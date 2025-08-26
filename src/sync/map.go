@@ -1,10 +1,12 @@
 package sync
 
+import "internal/task"
+
 // This file implements just enough of sync.Map to get packages to compile. It
 // is no more efficient than a map with a lock.
 
 type Map struct {
-	lock Mutex
+	lock task.PMutex
 	m    map[interface{}]interface{}
 }
 
@@ -67,4 +69,16 @@ func (m *Map) Range(f func(key, value interface{}) bool) {
 			break
 		}
 	}
+}
+
+// Swap replaces the value for the given key, and returns the old value if any.
+func (m *Map) Swap(key, value any) (previous any, loaded bool) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	if m.m == nil {
+		m.m = make(map[interface{}]interface{})
+	}
+	previous, loaded = m.m[key]
+	m.m[key] = value
+	return
 }

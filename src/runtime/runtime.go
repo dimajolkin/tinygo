@@ -8,6 +8,17 @@ import (
 
 const Compiler = "tinygo"
 
+// Unit for the 'ticks' and 'sleepTicks' functions.
+//
+// This is the native time unit for the given system. One timeUnit tick might be
+// 1ns or 100ns on a desktop system, or 1/32768s on baremetal systems with a
+// low-power RTC. Many other tick durations are possible.
+//
+// Conversion from time units to nanoseconds and back is done using
+// ticksToNanoseconds and nanosecondsToTicks, which need to be implemented for
+// each system as needed.
+type timeUnit int64
+
 // The compiler will fill this with calls to the initialization function of each
 // package.
 func initAll()
@@ -41,11 +52,9 @@ func memmove(dst, src unsafe.Pointer, size uintptr)
 // like llvm.memset.p0.i32(ptr, 0, size, false).
 func memzero(ptr unsafe.Pointer, size uintptr)
 
-// This intrinsic returns the current stack pointer.
-// It is normally used together with llvm.stackrestore but also works to get the
-// current stack pointer in a platform-independent way.
-//
-//export llvm.stacksave
+// Return the current stack pointer using the llvm.stacksave.p0 intrinsic.
+// It is normally used together with llvm.stackrestore.p0 but also works to get
+// the current stack pointer in a platform-independent way.
 func stacksave() unsafe.Pointer
 
 //export strlen
@@ -53,6 +62,11 @@ func strlen(ptr unsafe.Pointer) uintptr
 
 //export malloc
 func malloc(size uintptr) unsafe.Pointer
+
+// Return the address of an exported function.
+// This is mainly useful to pass a function pointer without extra context
+// parameter to C, for example.
+func exportedFuncPtr(fn func()) uintptr
 
 // Compare two same-size buffers for equality.
 func memequal(x, y unsafe.Pointer, n uintptr) bool {
@@ -92,6 +106,33 @@ func UnlockOSThread() {
 // point of the call.
 func KeepAlive(x interface{})
 
+// AddCleanup is a dummy cleanup implementation. It doesn't do any cleaning up.
+//
+// We base this on the following loophole in the official runtime.AddCleanup
+// documentation:
+//
+// > The cleanup(arg) call is not always guaranteed to run; in particular it is
+// > not guaranteed to run before program exit.
+//
+// So it's technically correct (the best kind of correct) to not run any
+// cleanups. But of course, this can lead to resource leaks so cleanups may need
+// to be implemented eventually.
+func AddCleanup[T, S any](ptr *T, cleanup func(S), arg S) Cleanup {
+	return Cleanup{}
+}
+
+type Cleanup struct{}
+
+func (c Cleanup) Stop() {}
+
+//go:linkname registerWeakPointer weak.runtime_registerWeakPointer
+func registerWeakPointer(ptr unsafe.Pointer) unsafe.Pointer {
+	// TODO: unimplemented.
+	// I hope not implementing this won't break anything, like packages that
+	// expect weak pointers to be GC'd before they actually are.
+	return ptr
+}
+
 var godebugUpdate func(string, string)
 
 //go:linkname godebug_setUpdate internal/godebug.setUpdate
@@ -123,4 +164,14 @@ func write(fd uintptr, p unsafe.Pointer, n int32) int32 {
 		return n
 	}
 	return 0
+}
+
+// getAuxv is linknamed from golang.org/x/sys/cpu.
+func getAuxv() []uintptr {
+	return nil
+}
+
+// Called from cgo to obtain the errno value.
+func cgo_errno() uintptr {
+	return uintptr(*libc_errno_location())
 }

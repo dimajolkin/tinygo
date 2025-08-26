@@ -10,12 +10,12 @@ commands:
     steps:
       - restore_cache:
           keys:
-            - llvm-source-16-v3
+            - llvm-source-19-v1
       - run:
           name: "Fetch LLVM source"
           command: make llvm-source
       - save_cache:
-          key: llvm-source-16-v3
+          key: llvm-source-19-v1
           paths:
             - llvm-project/clang/lib/Headers
             - llvm-project/clang/include
@@ -33,13 +33,13 @@ commands:
     steps:
       - restore_cache:
           keys:
-            - binaryen-linux-v2
+            - binaryen-linux-v3
       - run:
           name: "Build Binaryen"
           command: |
             make binaryen
       - save_cache:
-          key: binaryen-linux-v2
+          key: binaryen-linux-v3
           paths:
             - build/wasm-opt
   test-linux:
@@ -55,7 +55,7 @@ commands:
       - run:
           name: "Install apt dependencies"
           command: |
-            echo 'deb https://apt.llvm.org/buster/ llvm-toolchain-buster-<<parameters.llvm>> main' > /etc/apt/sources.list.d/llvm.list
+            echo 'deb https://apt.llvm.org/bullseye/ llvm-toolchain-bullseye-<<parameters.llvm>> main' > /etc/apt/sources.list.d/llvm.list
             wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add -
             apt-get update
             apt-get install --no-install-recommends -y \
@@ -69,18 +69,10 @@ commands:
       - build-binaryen-linux
       - restore_cache:
           keys:
-            - go-cache-v3-{{ checksum "go.mod" }}-{{ .Environment.CIRCLE_PREVIOUS_BUILD_NUM }}
-            - go-cache-v3-{{ checksum "go.mod" }}
+            - go-cache-v4-{{ checksum "go.mod" }}-{{ .Environment.CIRCLE_PREVIOUS_BUILD_NUM }}
+            - go-cache-v4-{{ checksum "go.mod" }}
       - llvm-source-linux
       - run: go install -tags=llvm<<parameters.llvm>> .
-      - restore_cache:
-          keys:
-            - wasi-libc-sysroot-systemclang-v6
-      - run: make wasi-libc
-      - save_cache:
-          key: wasi-libc-sysroot-systemclang-v6
-          paths:
-            - lib/wasi-libc/sysroot
       - when:
           condition: <<parameters.fmt-check>>
           steps:
@@ -88,27 +80,40 @@ commands:
               # Do this before gen-device so that it doesn't check the
               # formatting of generated files.
               name: Check Go code formatting
-              command: make fmt-check
+              command: make fmt-check lint
       - run: make gen-device -j4
+      # TODO: change this to -skip='TestErrors|TestWasm' with Go 1.20
+      - run: go test -tags=llvm<<parameters.llvm>> -short -run='TestBuild|TestTest|TestGetList|TestTraceback'
       - run: make smoketest XTENSA=0
       - save_cache:
-          key: go-cache-v3-{{ checksum "go.mod" }}-{{ .Environment.CIRCLE_BUILD_NUM }}
+          key: go-cache-v4-{{ checksum "go.mod" }}-{{ .Environment.CIRCLE_BUILD_NUM }}
           paths:
             - ~/.cache/go-build
             - /go/pkg/mod
 
 jobs:
-  test-llvm14-go118:
+  test-oldest:
+    # This tests our lowest supported versions of Go and LLVM, to make sure at
+    # least the smoke tests still pass.
     docker:
-      - image: golang:1.18-buster
+      - image: golang:1.22-bullseye
     steps:
       - test-linux:
-          llvm: "14"
+          llvm: "15"
+    resource_class: large
+  test-newest:
+    # This tests the latest supported LLVM version when linking against system
+    # libraries.
+    docker:
+      - image: golang:1.25-bullseye
+    steps:
+      - test-linux:
+          llvm: "20"
     resource_class: large
 
 workflows:
   test-all:
     jobs:
-      # This tests our lowest supported versions of Go and LLVM, to make sure at
-      # least the smoke tests still pass.
-      - test-llvm14-go118
+      - test-oldest
+      # disable this test, since CircleCI seems unable to download due to rate-limits on Dockerhub.
+      # - test-newest

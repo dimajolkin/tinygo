@@ -49,8 +49,8 @@ const (
 	PC5 = portC + 5
 	PC6 = portC + 6
 	PC7 = portC + 7
-	PD0 = portD + 0
-	PD1 = portD + 1
+	PD0 = portD + 0 // peripherals: I2C0 SCL
+	PD1 = portD + 1 // peripherals: I2C0 SDA
 	PD2 = portD + 2
 	PD3 = portD + 3
 	PD7 = portD + 7
@@ -180,7 +180,7 @@ func (pwm PWM) Configure(config PWMConfig) error {
 			// Set the PWM mode to fast PWM (mode = 3).
 			avr.TCCR0A.Set(avr.TCCR0A_WGM00 | avr.TCCR0A_WGM01)
 			// monotonic timer is using the same time as PWM:0
-			// we must adust internal settings of monotonic timer when PWM:0 settings changed
+			// we must adjust internal settings of monotonic timer when PWM:0 settings changed
 			adjustMonotonicTimer()
 		} else {
 			avr.TCCR2B.Set(prescaler)
@@ -718,7 +718,7 @@ func (pwm PWM) Set(channel uint8, value uint32) {
 			}
 		}
 		// monotonic timer is using the same time as PWM:0
-		// we must adust internal settings of monotonic timer when PWM:0 settings changed
+		// we must adjust internal settings of monotonic timer when PWM:0 settings changed
 		adjustMonotonicTimer()
 	case 1:
 		mask := interrupt.Disable()
@@ -927,7 +927,7 @@ func (pwm PWM) Set(channel uint8, value uint32) {
 }
 
 // SPI configuration
-var SPI0 = SPI{
+var SPI0 = &SPI{
 	spcr: avr.SPCR,
 	spdr: avr.SPDR,
 	spsr: avr.SPSR,

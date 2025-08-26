@@ -2,6 +2,11 @@
 
 package machine
 
+// Return the current CPU frequency in hertz.
+func CPUFrequency() uint32 {
+	return 16000000
+}
+
 const (
 	// Note: start at port B because there is no port A.
 	portB Pin = iota * 8
@@ -22,8 +27,8 @@ const (
 	PC1 = portC + 1
 	PC2 = portC + 2
 	PC3 = portC + 3
-	PC4 = portC + 4
-	PC5 = portC + 5
+	PC4 = portC + 4 // peripherals: I2C0 SDA
+	PC5 = portC + 5 // peripherals: I2C0 SCL
 	PC6 = portC + 6
 	PC7 = portC + 7
 	PD0 = portD + 0

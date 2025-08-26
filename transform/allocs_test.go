@@ -17,7 +17,7 @@ import (
 func TestAllocs(t *testing.T) {
 	t.Parallel()
 	testTransform(t, "testdata/allocs", func(mod llvm.Module) {
-		transform.OptimizeAllocs(mod, nil, nil)
+		transform.OptimizeAllocs(mod, nil, 256, nil)
 	})
 }
 
@@ -38,15 +38,16 @@ func TestAllocs2(t *testing.T) {
 	mod := compileGoFileForTesting(t, "./testdata/allocs2.go")
 
 	// Run functionattrs pass, which is necessary for escape analysis.
-	pm := llvm.NewPassManager()
-	defer pm.Dispose()
-	pm.AddInstructionCombiningPass()
-	pm.AddFunctionAttrsPass()
-	pm.Run(mod)
+	po := llvm.NewPassBuilderOptions()
+	defer po.Dispose()
+	err := mod.RunPasses("function(instcombine),function-attrs", llvm.TargetMachine{}, po)
+	if err != nil {
+		t.Error("failed to run passes:", err)
+	}
 
 	// Run heap to stack transform.
 	var testOutputs []allocsTestOutput
-	transform.OptimizeAllocs(mod, regexp.MustCompile("."), func(pos token.Position, msg string) {
+	transform.OptimizeAllocs(mod, regexp.MustCompile("."), 256, func(pos token.Position, msg string) {
 		testOutputs = append(testOutputs, allocsTestOutput{
 			filename: filepath.Base(pos.Filename),
 			line:     pos.Line,

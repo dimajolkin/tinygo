@@ -7,16 +7,18 @@
 package machine
 
 import (
-	"bytes"
 	"device/arm"
 	"device/sam"
-	"encoding/binary"
 	"errors"
+	"internal/binary"
 	"runtime/interrupt"
 	"unsafe"
 )
 
 const deviceName = sam.Device
+
+// DS60001507, Section 9.6: Serial Number
+var deviceIDAddr = []uintptr{0x008061FC, 0x00806010, 0x00806014, 0x00806018}
 
 func CPUFrequency() uint32 {
 	return 120000000
@@ -79,22 +81,22 @@ const (
 	PA05 Pin = 5
 	PA06 Pin = 6
 	PA07 Pin = 7
-	PA08 Pin = 8  // peripherals: TCC0 channel 0, TCC1 channel 4
-	PA09 Pin = 9  // peripherals: TCC0 channel 1, TCC1 channel 5
+	PA08 Pin = 8  // peripherals: TCC0 channel 0, TCC1 channel 4, sercomI2CM0 SDA, sercomI2CM2 SDA
+	PA09 Pin = 9  // peripherals: TCC0 channel 1, TCC1 channel 5, sercomI2CM0 SCL, sercomI2CM2 SCL
 	PA10 Pin = 10 // peripherals: TCC0 channel 2, TCC1 channel 6
 	PA11 Pin = 11 // peripherals: TCC0 channel 3, TCC1 channel 7
-	PA12 Pin = 12 // peripherals: TCC0 channel 6, TCC1 channel 2
-	PA13 Pin = 13 // peripherals: TCC0 channel 7, TCC1 channel 3
+	PA12 Pin = 12 // peripherals: TCC0 channel 6, TCC1 channel 2, sercomI2CM2 SDA, sercomI2CM4 SDA
+	PA13 Pin = 13 // peripherals: TCC0 channel 7, TCC1 channel 3, sercomI2CM2 SCL, sercomI2CM4 SCL
 	PA14 Pin = 14 // peripherals: TCC2 channel 0, TCC1 channel 2
 	PA15 Pin = 15 // peripherals: TCC2 channel 1, TCC1 channel 3
-	PA16 Pin = 16 // peripherals: TCC1 channel 0, TCC0 channel 4
-	PA17 Pin = 17 // peripherals: TCC1 channel 1, TCC0 channel 5
+	PA16 Pin = 16 // peripherals: TCC1 channel 0, TCC0 channel 4, sercomI2CM1 SDA, sercomI2CM3 SDA
+	PA17 Pin = 17 // peripherals: TCC1 channel 1, TCC0 channel 5, sercomI2CM1 SCL, sercomI2CM3 SCL
 	PA18 Pin = 18 // peripherals: TCC1 channel 2, TCC0 channel 6
 	PA19 Pin = 19 // peripherals: TCC1 channel 3, TCC0 channel 7
 	PA20 Pin = 20 // peripherals: TCC1 channel 4, TCC0 channel 0
 	PA21 Pin = 21 // peripherals: TCC1 channel 5, TCC0 channel 1
-	PA22 Pin = 22 // peripherals: TCC1 channel 6, TCC0 channel 2
-	PA23 Pin = 23 // peripherals: TCC1 channel 7, TCC0 channel 3
+	PA22 Pin = 22 // peripherals: TCC1 channel 6, TCC0 channel 2, sercomI2CM3 SDA, sercomI2CM5 SDA
+	PA23 Pin = 23 // peripherals: TCC1 channel 7, TCC0 channel 3, sercomI2CM3 SCL, sercomI2CM5 SCL
 	PA24 Pin = 24 // peripherals: TCC2 channel 2
 	PA25 Pin = 25 // peripherals: TCC2 channel 3
 	PA26 Pin = 26
@@ -175,8 +177,8 @@ const (
 	PD05 Pin = 101
 	PD06 Pin = 102
 	PD07 Pin = 103
-	PD08 Pin = 104 // peripherals: TCC0 channel 1
-	PD09 Pin = 105 // peripherals: TCC0 channel 2
+	PD08 Pin = 104 // peripherals: TCC0 channel 1, sercomI2CM6 SDA, sercomI2CM7 SDA
+	PD09 Pin = 105 // peripherals: TCC0 channel 2, sercomI2CM6 SCL, sercomI2CM7 SCL
 	PD10 Pin = 106 // peripherals: TCC0 channel 3
 	PD11 Pin = 107 // peripherals: TCC0 channel 4
 	PD12 Pin = 108 // peripherals: TCC0 channel 5
@@ -1012,14 +1014,14 @@ func (uart *UART) Configure(config UARTConfig) error {
 	if !ok {
 		return ErrInvalidOutputPin
 	}
-	var txPinOut uint32
+	var txPadOut uint32
 	// See CTRLA.RXPO bits of the SERCOM USART peripheral (page 945-946) for how
 	// pads are mapped to pinout values.
 	switch txPad {
 	case 0:
-		txPinOut = 0
+		txPadOut = 0
 	default:
-		// TODO: flow control (RTS/CTS)
+		// should be flow control (RTS/CTS) pin
 		return ErrInvalidOutputPin
 	}
 
@@ -1030,11 +1032,31 @@ func (uart *UART) Configure(config UARTConfig) error {
 	}
 	// As you can see in the CTRLA.RXPO bits of the SERCOM USART peripheral
 	// (page 945), input pins are mapped directly.
-	rxPinOut := rxPad
+	rxPadOut := rxPad
 
 	// configure pins
 	config.TX.Configure(PinConfig{Mode: txPinMode})
 	config.RX.Configure(PinConfig{Mode: rxPinMode})
+
+	// configure RTS/CTS pins if provided
+	if config.RTS != 0 && config.CTS != 0 {
+		rtsPinMode, _, ok := findPinPadMapping(uart.SERCOM, config.RTS)
+		if !ok {
+			return ErrInvalidOutputPin
+		}
+
+		ctsPinMode, _, ok := findPinPadMapping(uart.SERCOM, config.CTS)
+		if !ok {
+			return ErrInvalidInputPin
+		}
+
+		// See CTRLA.RXPO bits of the SERCOM USART peripheral (page 945-946) for how
+		// pads are mapped to pinout values.
+		txPadOut = 2
+
+		config.RTS.Configure(PinConfig{Mode: rtsPinMode})
+		config.CTS.Configure(PinConfig{Mode: ctsPinMode})
+	}
 
 	// reset SERCOM
 	uart.Bus.CTRLA.SetBits(sam.SERCOM_USART_INT_CTRLA_SWRST)
@@ -1072,8 +1094,8 @@ func (uart *UART) Configure(config UARTConfig) error {
 	// set UART pads. This is not same as pins...
 	//  SERCOM_USART_CTRLA_TXPO(txPad) |
 	//   SERCOM_USART_CTRLA_RXPO(rxPad);
-	uart.Bus.CTRLA.SetBits((txPinOut << sam.SERCOM_USART_INT_CTRLA_TXPO_Pos) |
-		(rxPinOut << sam.SERCOM_USART_INT_CTRLA_RXPO_Pos))
+	uart.Bus.CTRLA.SetBits((txPadOut << sam.SERCOM_USART_INT_CTRLA_TXPO_Pos) |
+		(rxPadOut << sam.SERCOM_USART_INT_CTRLA_RXPO_Pos))
 
 	// Enable Transceiver and Receiver
 	//sercom->USART.CTRLB.reg |= SERCOM_USART_CTRLB_TXEN | SERCOM_USART_CTRLB_RXEN ;
@@ -1228,12 +1250,13 @@ func (i2c *I2C) Configure(config I2CConfig) error {
 	return nil
 }
 
-// SetBaudRate sets the communication speed for the I2C.
-func (i2c *I2C) SetBaudRate(br uint32) {
+// SetBaudRate sets the communication speed for I2C.
+func (i2c *I2C) SetBaudRate(br uint32) error {
 	// Synchronous arithmetic baudrate, via Adafruit SAMD51 implementation:
 	// sercom->I2CM.BAUD.bit.BAUD = SERCOM_FREQ_REF / ( 2 * baudrate) - 1 ;
 	baud := SERCOM_FREQ_REF/(2*br) - 1
 	i2c.Bus.BAUD.Set(baud)
+	return nil
 }
 
 // Tx does a single I2C transaction at the specified address.
@@ -1408,7 +1431,7 @@ type SPIConfig struct {
 }
 
 // Configure is intended to setup the SPI interface.
-func (spi SPI) Configure(config SPIConfig) error {
+func (spi *SPI) Configure(config SPIConfig) error {
 	// Use default pins if not set.
 	if config.SCK == 0 && config.SDO == 0 && config.SDI == 0 {
 		config.SCK = SPI0_SCK_PIN
@@ -1551,7 +1574,7 @@ func (spi SPI) Configure(config SPIConfig) error {
 }
 
 // Transfer writes/reads a single byte using the SPI interface.
-func (spi SPI) Transfer(w byte) (byte, error) {
+func (spi *SPI) Transfer(w byte) (byte, error) {
 	// write data
 	spi.Bus.DATA.Set(uint32(w))
 
@@ -1563,7 +1586,7 @@ func (spi SPI) Transfer(w byte) (byte, error) {
 	return byte(spi.Bus.DATA.Get()), nil
 }
 
-// Tx handles read/write operation for SPI interface. Since SPI is a syncronous write/read
+// Tx handles read/write operation for SPI interface. Since SPI is a synchronous write/read
 // interface, there must always be the same number of bytes written as bytes read.
 // The Tx method knows about this, and offers a few different ways of calling it.
 //
@@ -1580,7 +1603,7 @@ func (spi SPI) Transfer(w byte) (byte, error) {
 // This form sends zeros, putting the result into the rx buffer. Good for reading a "result packet":
 //
 //	spi.Tx(nil, rx)
-func (spi SPI) Tx(w, r []byte) error {
+func (spi *SPI) Tx(w, r []byte) error {
 	switch {
 	case w == nil:
 		// read only, so write zero and read a result.
@@ -1601,7 +1624,7 @@ func (spi SPI) Tx(w, r []byte) error {
 	return nil
 }
 
-func (spi SPI) tx(tx []byte) {
+func (spi *SPI) tx(tx []byte) {
 	for i := 0; i < len(tx); i++ {
 		for !spi.Bus.INTFLAG.HasBits(sam.SERCOM_SPIM_INTFLAG_DRE) {
 		}
@@ -1616,7 +1639,7 @@ func (spi SPI) tx(tx []byte) {
 	}
 }
 
-func (spi SPI) rx(rx []byte) {
+func (spi *SPI) rx(rx []byte) {
 	spi.Bus.DATA.Set(0)
 	for !spi.Bus.INTFLAG.HasBits(sam.SERCOM_SPIM_INTFLAG_DRE) {
 	}
@@ -1632,7 +1655,7 @@ func (spi SPI) rx(rx []byte) {
 	rx[len(rx)-1] = byte(spi.Bus.DATA.Get())
 }
 
-func (spi SPI) txrx(tx, rx []byte) {
+func (spi *SPI) txrx(tx, rx []byte) {
 	spi.Bus.DATA.Set(uint32(tx[0]))
 	for !spi.Bus.INTFLAG.HasBits(sam.SERCOM_SPIM_INTFLAG_DRE) {
 	}
@@ -1696,7 +1719,7 @@ func (tcc *TCC) Configure(config PWMConfig) error {
 	for tcc.timer().SYNCBUSY.Get() != 0 {
 	}
 
-	// Return any error that might have occured in the tcc.setPeriod call.
+	// Return any error that might have occurred in the tcc.setPeriod call.
 	return err
 }
 
@@ -1904,7 +1927,7 @@ var pinTimerMapping = [...]struct{ F, G uint8 }{
 	PB02 / 2: {pinTCC2_2, 0},
 }
 
-// findPinPadMapping returns the pin mode (PinTCCF or PinTCCG) and the channel
+// findPinTimerMapping returns the pin mode (PinTCCF or PinTCCG) and the channel
 // number for a given timer and pin. A zero PinMode is returned if no mapping
 // could be found.
 func findPinTimerMapping(timer uint8, pin Pin) (PinMode, uint8) {
@@ -2140,7 +2163,7 @@ func (f flashBlockDevice) ReadAt(p []byte, off int64) (n int, err error) {
 }
 
 // WriteAt writes the given number of bytes to the block device.
-// Only word (32 bits) length data can be programmed.
+// Data is written to the page buffer in 4-byte chunks, then saved to flash memory.
 // See SAM-D5x-E5x-Family-Data-Sheet-DS60001507.pdf page 591-592.
 // If the length of p is not long enough it will be padded with 0xFF bytes.
 // This method assumes that the destination is already erased.
@@ -2150,7 +2173,7 @@ func (f flashBlockDevice) WriteAt(p []byte, off int64) (n int, err error) {
 	}
 
 	address := FlashDataStart() + uintptr(off)
-	padded := f.pad(p)
+	padded := flashPad(p, int(f.WriteBlockSize()))
 
 	settings := disableFlashCache()
 	defer restoreFlashCache(settings)
@@ -2162,16 +2185,13 @@ func (f flashBlockDevice) WriteAt(p []byte, off int64) (n int, err error) {
 	waitWhileFlashBusy()
 
 	for j := 0; j < len(padded); j += int(f.WriteBlockSize()) {
-		// write first word using double-word low order word
-		*(*uint32)(unsafe.Pointer(address)) = binary.LittleEndian.Uint32(padded[j : j+int(f.WriteBlockSize()/2)])
-
-		// write second word using double-word high order word
-		*(*uint32)(unsafe.Add(unsafe.Pointer(address), uintptr(f.WriteBlockSize())/2)) = binary.LittleEndian.Uint32(padded[j+int(f.WriteBlockSize()/2) : j+int(f.WriteBlockSize())])
-
-		waitWhileFlashBusy()
+		// page buffer is 512 bytes long, but only 4 bytes can be written at once
+		for k := 0; k < int(f.WriteBlockSize()); k += 4 {
+			*(*uint32)(unsafe.Pointer(address + uintptr(k))) = binary.LittleEndian.Uint32(padded[j+k : j+k+4])
+		}
 
 		sam.NVMCTRL.SetADDR(uint32(address))
-		sam.NVMCTRL.CTRLB.Set(sam.NVMCTRL_CTRLB_CMD_WQW | (sam.NVMCTRL_CTRLB_CMDEX_KEY << sam.NVMCTRL_CTRLB_CMDEX_Pos))
+		sam.NVMCTRL.CTRLB.Set(sam.NVMCTRL_CTRLB_CMD_WP | (sam.NVMCTRL_CTRLB_CMDEX_KEY << sam.NVMCTRL_CTRLB_CMDEX_Pos))
 
 		waitWhileFlashBusy()
 
@@ -2190,7 +2210,7 @@ func (f flashBlockDevice) Size() int64 {
 	return int64(FlashDataEnd() - FlashDataStart())
 }
 
-const writeBlockSize = 8
+const writeBlockSize = 512
 
 // WriteBlockSize returns the block size in which data can be written to
 // memory. It can be used by a client to optimize writes, non-aligned writes
@@ -2237,17 +2257,6 @@ func (f flashBlockDevice) EraseBlocks(start, len int64) error {
 	}
 
 	return nil
-}
-
-// pad data if needed so it is long enough for correct byte alignment on writes.
-func (f flashBlockDevice) pad(p []byte) []byte {
-	overflow := int64(len(p)) % f.WriteBlockSize()
-	if overflow == 0 {
-		return p
-	}
-
-	padding := bytes.Repeat([]byte{0xff}, int(f.WriteBlockSize()-overflow))
-	return append(p, padding...)
 }
 
 func disableFlashCache() uint16 {
@@ -2345,6 +2354,5 @@ func (wd *watchdogImpl) Start() error {
 
 // Update the watchdog, indicating that `source` is healthy.
 func (wd *watchdogImpl) Update() {
-	// 0xA5 = magic value (see datasheet)
-	sam.WDT.CLEAR.Set(0xA5)
+	sam.WDT.CLEAR.Set(sam.WDT_CLEAR_CLEAR_KEY)
 }

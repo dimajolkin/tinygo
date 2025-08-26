@@ -8,60 +8,29 @@ import (
 
 	"github.com/tinygo-org/tinygo/compileopts"
 	"github.com/tinygo-org/tinygo/compiler/ircheck"
+	"github.com/tinygo-org/tinygo/compiler/llvmutil"
 	"tinygo.org/x/go-llvm"
 )
 
 // OptimizePackage runs optimization passes over the LLVM module for the given
 // Go package.
 func OptimizePackage(mod llvm.Module, config *compileopts.Config) {
-	optLevel, sizeLevel, _ := config.OptLevels()
-
-	// Run function passes for each function in the module.
-	// These passes are intended to be run on each function right
-	// after they're created to reduce IR size (and maybe also for
-	// cache locality to improve performance), but for now they're
-	// run here for each function in turn. Maybe this can be
-	// improved in the future.
-	builder := llvm.NewPassManagerBuilder()
-	defer builder.Dispose()
-	builder.SetOptLevel(optLevel)
-	builder.SetSizeLevel(sizeLevel)
-	funcPasses := llvm.NewFunctionPassManagerForModule(mod)
-	defer funcPasses.Dispose()
-	builder.PopulateFunc(funcPasses)
-	funcPasses.InitializeFunc()
-	for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
-		if fn.IsDeclaration() {
-			continue
-		}
-		funcPasses.RunFunc(fn)
-	}
-	funcPasses.FinalizeFunc()
+	_, speedLevel, _ := config.OptLevel()
 
 	// Run TinyGo-specific optimization passes.
-	if optLevel > 0 {
+	if speedLevel > 0 {
 		OptimizeMaps(mod)
 	}
 }
 
 // Optimize runs a number of optimization and transformation passes over the
 // given module. Some passes are specific to TinyGo, others are generic LLVM
-// passes. You can set a preferred performance (0-3) and size (0-2) level and
-// control the limits of the inliner (higher numbers mean more inlining, set it
-// to 0 to disable entirely).
+// passes.
 //
 // Please note that some optimizations are not optional, thus Optimize must
-// alwasy be run before emitting machine code. Set all controls (optLevel,
-// sizeLevel, inlinerThreshold) to 0 to reduce the number of optimizations to a
-// minimum.
-func Optimize(mod llvm.Module, config *compileopts.Config, optLevel, sizeLevel int, inlinerThreshold uint) []error {
-	builder := llvm.NewPassManagerBuilder()
-	defer builder.Dispose()
-	builder.SetOptLevel(optLevel)
-	builder.SetSizeLevel(sizeLevel)
-	if inlinerThreshold != 0 {
-		builder.UseInlinerWithThreshold(inlinerThreshold)
-	}
+// always be run before emitting machine code.
+func Optimize(mod llvm.Module, config *compileopts.Config) []error {
+	optLevel, speedLevel, _ := config.OptLevel()
 
 	// Make sure these functions are kept in tact during TinyGo transformation passes.
 	for _, name := range functionsUsedInTransforms {
@@ -72,10 +41,6 @@ func Optimize(mod llvm.Module, config *compileopts.Config, optLevel, sizeLevel i
 		fn.SetLinkage(llvm.ExternalLinkage)
 	}
 
-	if config.PanicStrategy() == "trap" {
-		ReplacePanicsWithTrap(mod) // -panic=trap
-	}
-
 	// run a check of all of our code
 	if config.VerifyIR() {
 		errs := ircheck.Module(mod)
@@ -84,23 +49,26 @@ func Optimize(mod llvm.Module, config *compileopts.Config, optLevel, sizeLevel i
 		}
 	}
 
-	if optLevel > 0 {
+	if speedLevel > 0 {
 		// Run some preparatory passes for the Go optimizer.
-		goPasses := llvm.NewPassManager()
-		defer goPasses.Dispose()
-		goPasses.AddGlobalDCEPass()
-		goPasses.AddGlobalOptimizerPass()
-		goPasses.AddIPSCCPPass()
-		goPasses.AddInstructionCombiningPass() // necessary for OptimizeReflectImplements
-		goPasses.AddAggressiveDCEPass()
-		goPasses.AddFunctionAttrsPass()
-		goPasses.Run(mod)
+		po := llvm.NewPassBuilderOptions()
+		defer po.Dispose()
+		optPasses := "globaldce,globalopt,ipsccp,instcombine<no-verify-fixpoint>,adce,function-attrs"
+		if llvmutil.Version() < 18 {
+			// LLVM 17 doesn't have the no-verify-fixpoint flag.
+			optPasses = "globaldce,globalopt,ipsccp,instcombine,adce,function-attrs"
+		}
+		err := mod.RunPasses(optPasses, llvm.TargetMachine{}, po)
+		if err != nil {
+			return []error{fmt.Errorf("could not build pass pipeline: %w", err)}
+		}
 
 		// Run TinyGo-specific optimization passes.
 		OptimizeStringToBytes(mod)
 		OptimizeReflectImplements(mod)
-		OptimizeAllocs(mod, nil, nil)
-		err := LowerInterfaces(mod, config)
+		maxStackSize := config.MaxStackAlloc()
+		OptimizeAllocs(mod, nil, maxStackSize, nil)
+		err = LowerInterfaces(mod, config)
 		if err != nil {
 			return []error{err}
 		}
@@ -113,10 +81,13 @@ func Optimize(mod llvm.Module, config *compileopts.Config, optLevel, sizeLevel i
 		// After interfaces are lowered, there are many more opportunities for
 		// interprocedural optimizations. To get them to work, function
 		// attributes have to be updated first.
-		goPasses.Run(mod)
+		err = mod.RunPasses(optPasses, llvm.TargetMachine{}, po)
+		if err != nil {
+			return []error{fmt.Errorf("could not build pass pipeline: %w", err)}
+		}
 
 		// Run TinyGo-specific interprocedural optimizations.
-		OptimizeAllocs(mod, config.Options.PrintAllocs, func(pos token.Position, msg string) {
+		OptimizeAllocs(mod, config.Options.PrintAllocs, maxStackSize, func(pos token.Position, msg string) {
 			fmt.Fprintln(os.Stderr, pos.String()+": "+msg)
 		})
 		OptimizeStringToBytes(mod)
@@ -134,10 +105,12 @@ func Optimize(mod llvm.Module, config *compileopts.Config, optLevel, sizeLevel i
 		}
 
 		// Clean up some leftover symbols of the previous transformations.
-		goPasses := llvm.NewPassManager()
-		defer goPasses.Dispose()
-		goPasses.AddGlobalDCEPass()
-		goPasses.Run(mod)
+		po := llvm.NewPassBuilderOptions()
+		defer po.Dispose()
+		err = mod.RunPasses("globaldce", llvm.TargetMachine{}, po)
+		if err != nil {
+			return []error{fmt.Errorf("could not build pass pipeline: %w", err)}
+		}
 	}
 
 	if config.Scheduler() == "none" {
@@ -169,23 +142,17 @@ func Optimize(mod llvm.Module, config *compileopts.Config, optLevel, sizeLevel i
 		fn.SetLinkage(llvm.InternalLinkage)
 	}
 
-	// Run function passes again, because without it, llvm.coro.size.i32()
-	// doesn't get lowered.
-	funcPasses := llvm.NewFunctionPassManagerForModule(mod)
-	defer funcPasses.Dispose()
-	builder.PopulateFunc(funcPasses)
-	funcPasses.InitializeFunc()
-	for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
-		funcPasses.RunFunc(fn)
+	// Run the ThinLTO pre-link passes, meant to be run on each individual
+	// module. This saves compilation time compared to "default<#>" and is meant
+	// to better match the optimization passes that are happening during
+	// ThinLTO.
+	po := llvm.NewPassBuilderOptions()
+	defer po.Dispose()
+	passes := fmt.Sprintf("thinlto-pre-link<%s>", optLevel)
+	err := mod.RunPasses(passes, llvm.TargetMachine{}, po)
+	if err != nil {
+		return []error{fmt.Errorf("could not build pass pipeline: %w", err)}
 	}
-	funcPasses.FinalizeFunc()
-
-	// Run module passes.
-	// TODO: somehow set the PrepareForThinLTO flag in the pass manager builder.
-	modPasses := llvm.NewPassManager()
-	defer modPasses.Dispose()
-	builder.Populate(modPasses)
-	modPasses.Run(mod)
 
 	hasGCPass := MakeGCStackSlots(mod)
 	if hasGCPass {

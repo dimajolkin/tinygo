@@ -49,7 +49,7 @@ const (
 
 var (
 	errUnsupportedSPIController = errors.New("SPI controller not supported. Use SPI0 or SPI1.")
-	errI2CTxAbort               = errors.New("I2C transmition has been aborted.")
+	errI2CTxAbort               = errors.New("I2C transmission has been aborted.")
 )
 
 func (p Pin) setFPIOAIOPull(pull fpioaPullMode) {
@@ -419,7 +419,7 @@ type SPIConfig struct {
 // Configure is intended to setup the SPI interface.
 // Only SPI controller 0 and 1 can be used because SPI2 is a special
 // peripheral-mode controller and SPI3 is used for flashing.
-func (spi SPI) Configure(config SPIConfig) error {
+func (spi *SPI) Configure(config SPIConfig) error {
 	// Use default pins if not set.
 	if config.SCK == 0 && config.SDO == 0 && config.SDI == 0 {
 		config.SCK = SPI0_SCK_PIN
@@ -476,7 +476,7 @@ func (spi SPI) Configure(config SPIConfig) error {
 }
 
 // Transfer writes/reads a single byte using the SPI interface.
-func (spi SPI) Transfer(w byte) (byte, error) {
+func (spi *SPI) Transfer(w byte) (byte, error) {
 	spi.Bus.SSIENR.Set(0)
 
 	// Set transfer-receive mode.
@@ -563,7 +563,19 @@ func (i2c *I2C) Configure(config I2CConfig) error {
 		config.SCL.SetFPIOAFunction(FUNC_I2C2_SCLK)
 	}
 
-	div := CPUFrequency() / config.Frequency / 16
+	i2c.SetBaudRate(config.Frequency)
+
+	i2c.Bus.INTR_MASK.Set(0)
+	i2c.Bus.DMA_CR.Set(0x03)
+	i2c.Bus.DMA_RDLR.Set(0)
+	i2c.Bus.DMA_TDLR.Set(0x4)
+
+	return nil
+}
+
+// SetBaudRate sets the communication speed for I2C.
+func (i2c *I2C) SetBaudRate(br uint32) error {
+	div := CPUFrequency() / br / 16
 
 	// Disable controller before setting the prescale register.
 	i2c.Bus.ENABLE.Set(0)
@@ -573,11 +585,6 @@ func (i2c *I2C) Configure(config I2CConfig) error {
 	// Set prescaler registers.
 	i2c.Bus.SS_SCL_HCNT.Set(uint32(div))
 	i2c.Bus.SS_SCL_LCNT.Set(uint32(div))
-
-	i2c.Bus.INTR_MASK.Set(0)
-	i2c.Bus.DMA_CR.Set(0x03)
-	i2c.Bus.DMA_RDLR.Set(0)
-	i2c.Bus.DMA_TDLR.Set(0x4)
 
 	return nil
 }
@@ -612,7 +619,7 @@ func (i2c *I2C) Tx(addr uint16, w, r []byte) error {
 			dataLen -= fifoLen
 		}
 
-		// Wait for transmition to complete.
+		// Wait for transmission to complete.
 		for i2c.Bus.STATUS.HasBits(kendryte.I2C_STATUS_ACTIVITY) || !i2c.Bus.STATUS.HasBits(kendryte.I2C_STATUS_TFE) {
 		}
 

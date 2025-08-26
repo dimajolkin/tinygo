@@ -14,6 +14,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	"tinygo.org/x/go-llvm"
 )
 
 // Keys is a slice of all available environment variable keys.
@@ -28,15 +30,27 @@ var Keys = []string{
 }
 
 func init() {
-	if Get("GOARCH") == "arm" {
+	switch Get("GOARCH") {
+	case "arm":
 		Keys = append(Keys, "GOARM")
+	case "mips", "mipsle":
+		Keys = append(Keys, "GOMIPS")
 	}
 }
+
+// Set to true if we're linking statically against LLVM.
+var hasBuiltinTools = false
 
 // TINYGOROOT is the path to the final location for checking tinygo files. If
 // unset (by a -X ldflag), then sourceDir() will fallback to the original build
 // directory.
 var TINYGOROOT string
+
+// If a particular Clang resource dir must always be used and TinyGo can't
+// figure out the directory using heuristics, this global can be set using a
+// linker flag.
+// This is needed for Nix.
+var clangResourceDir string
 
 // Variables read from a `go env` command invocation.
 var goEnvVars struct {
@@ -117,6 +131,13 @@ func Get(name string) string {
 		// difference between ARMv6 and ARMv7. ARMv6 binaries are much smaller,
 		// especially when floating point instructions are involved.
 		return "6"
+	case "GOMIPS":
+		gomips := os.Getenv("GOMIPS")
+		if gomips == "" {
+			// Default to hardfloat (this matches the Go toolchain).
+			gomips = "hardfloat"
+		}
+		return gomips
 	case "GOROOT":
 		readGoEnvVars()
 		return goEnvVars.GOROOT
@@ -131,11 +152,8 @@ func Get(name string) string {
 		}
 		return filepath.Join(dir, "tinygo")
 	case "CGO_ENABLED":
-		val := os.Getenv("CGO_ENABLED")
-		if val == "1" || val == "0" {
-			return val
-		}
-		// Default to enabling CGo.
+		// Always enable CGo. It is required by a number of targets, including
+		// macOS and the rp2040.
 		return "1"
 	case "TINYGOROOT":
 		return sourceDir()
@@ -151,6 +169,11 @@ func Get(name string) string {
 		}
 
 		return findWasmOpt()
+	case "WASMTOOLS":
+		if path := os.Getenv("WASMTOOLS"); path != "" {
+			return path
+		}
+		return "wasm-tools"
 	default:
 		return ""
 	}
@@ -283,4 +306,96 @@ func isSourceDir(root string) bool {
 	}
 	_, err = os.Stat(filepath.Join(root, "src/device/arm/arm.go"))
 	return err == nil
+}
+
+// ClangResourceDir returns the clang resource dir if available. This is the
+// -resource-dir flag. If it isn't available, an empty string is returned and
+// -resource-dir should be left unset.
+// The libclang flag must be set if the resource dir is read for use by
+// libclang.
+// In that case, the resource dir is always returned (even when linking
+// dynamically against LLVM) because libclang always needs this directory.
+func ClangResourceDir(libclang bool) string {
+	if clangResourceDir != "" {
+		// The resource dir is forced to a particular value at build time.
+		// This is needed on Nix for example, where Clang and libclang don't
+		// know their own resource dir.
+		// Also see:
+		// https://discourse.nixos.org/t/why-is-the-clang-resource-dir-split-in-a-separate-package/34114
+		return clangResourceDir
+	}
+
+	if !hasBuiltinTools && !libclang {
+		// Using external tools, so the resource dir doesn't need to be
+		// specified. Clang knows where to find it.
+		return ""
+	}
+
+	// Check whether we're running from a TinyGo release directory.
+	// This is the case for release binaries on GitHub.
+	root := Get("TINYGOROOT")
+	releaseHeaderDir := filepath.Join(root, "lib", "clang")
+	if _, err := os.Stat(releaseHeaderDir); !errors.Is(err, fs.ErrNotExist) {
+		return releaseHeaderDir
+	}
+
+	if hasBuiltinTools {
+		// We are statically linked to LLVM.
+		// Check whether we're running from the source directory.
+		// This typically happens when TinyGo was built using `make` as part of
+		// development.
+		llvmMajor := strings.Split(llvm.Version, ".")[0]
+		buildResourceDir := filepath.Join(root, "llvm-build", "lib", "clang", llvmMajor)
+		if _, err := os.Stat(buildResourceDir); !errors.Is(err, fs.ErrNotExist) {
+			return buildResourceDir
+		}
+	} else {
+		// We use external tools, either when installed using `go install` or
+		// when packaged in a Linux distribution (Linux distros typically prefer
+		// dynamic linking).
+		// Try to detect the system clang resources directory.
+		resourceDir := findSystemClangResources(root)
+		if resourceDir != "" {
+			return resourceDir
+		}
+	}
+
+	// Resource directory not found.
+	return ""
+}
+
+// Find the Clang resource dir on this particular system.
+// Return the empty string when they aren't found.
+func findSystemClangResources(TINYGOROOT string) string {
+	llvmMajor := strings.Split(llvm.Version, ".")[0]
+
+	switch runtime.GOOS {
+	case "linux", "android":
+		// Header files are typically stored in /usr/lib/clang/<version>/include.
+		// Tested on Fedora 39, Debian 12, and Arch Linux.
+		path := filepath.Join("/usr/lib/clang", llvmMajor)
+		_, err := os.Stat(filepath.Join(path, "include", "stdint.h"))
+		if err == nil {
+			return path
+		}
+	case "darwin":
+		// This assumes a Homebrew installation, like in builder/commands.go.
+		var prefix string
+		switch runtime.GOARCH {
+		case "amd64":
+			prefix = "/usr/local/opt/llvm@" + llvmMajor
+		case "arm64":
+			prefix = "/opt/homebrew/opt/llvm@" + llvmMajor
+		default:
+			return "" // very unlikely for now
+		}
+		path := fmt.Sprintf("%s/lib/clang/%s", prefix, llvmMajor)
+		_, err := os.Stat(path + "/include/stdint.h")
+		if err == nil {
+			return path
+		}
+	}
+
+	// Could not find it.
+	return ""
 }

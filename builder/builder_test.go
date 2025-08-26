@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/tinygo-org/tinygo/compileopts"
-	"github.com/tinygo-org/tinygo/goenv"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -34,8 +33,11 @@ func TestClangAttributes(t *testing.T) {
 		"k210",
 		"nintendoswitch",
 		"riscv-qemu",
-		"wasi",
+		"tkey",
+		"wasip1",
+		"wasip2",
 		"wasm",
+		"wasm-unknown",
 	}
 	if hasBuiltinTools {
 		// hasBuiltinTools is set when TinyGo is statically linked with LLVM,
@@ -52,19 +54,29 @@ func TestClangAttributes(t *testing.T) {
 	for _, options := range []*compileopts.Options{
 		{GOOS: "linux", GOARCH: "386"},
 		{GOOS: "linux", GOARCH: "amd64"},
-		{GOOS: "linux", GOARCH: "arm", GOARM: "5"},
-		{GOOS: "linux", GOARCH: "arm", GOARM: "6"},
-		{GOOS: "linux", GOARCH: "arm", GOARM: "7"},
+		{GOOS: "linux", GOARCH: "arm", GOARM: "5,softfloat"},
+		{GOOS: "linux", GOARCH: "arm", GOARM: "6,softfloat"},
+		{GOOS: "linux", GOARCH: "arm", GOARM: "7,softfloat"},
+		{GOOS: "linux", GOARCH: "arm", GOARM: "5,hardfloat"},
+		{GOOS: "linux", GOARCH: "arm", GOARM: "6,hardfloat"},
+		{GOOS: "linux", GOARCH: "arm", GOARM: "7,hardfloat"},
 		{GOOS: "linux", GOARCH: "arm64"},
+		{GOOS: "linux", GOARCH: "mips", GOMIPS: "hardfloat"},
+		{GOOS: "linux", GOARCH: "mipsle", GOMIPS: "hardfloat"},
+		{GOOS: "linux", GOARCH: "mips", GOMIPS: "softfloat"},
+		{GOOS: "linux", GOARCH: "mipsle", GOMIPS: "softfloat"},
 		{GOOS: "darwin", GOARCH: "amd64"},
 		{GOOS: "darwin", GOARCH: "arm64"},
+		{GOOS: "windows", GOARCH: "386"},
 		{GOOS: "windows", GOARCH: "amd64"},
 		{GOOS: "windows", GOARCH: "arm64"},
-		{GOOS: "wasip1", GOARCH: "wasm"},
 	} {
 		name := "GOOS=" + options.GOOS + ",GOARCH=" + options.GOARCH
 		if options.GOARCH == "arm" {
 			name += ",GOARM=" + options.GOARM
+		}
+		if options.GOARCH == "mips" || options.GOARCH == "mipsle" {
+			name += ",GOMIPS=" + options.GOMIPS
 		}
 		t.Run(name, func(t *testing.T) {
 			testClangAttributes(t, options)
@@ -74,7 +86,6 @@ func TestClangAttributes(t *testing.T) {
 
 func testClangAttributes(t *testing.T, options *compileopts.Options) {
 	testDir := t.TempDir()
-	clangHeaderPath := getClangHeaderPath(goenv.Get("TINYGOROOT"))
 
 	ctx := llvm.NewContext()
 	defer ctx.Dispose()
@@ -84,9 +95,8 @@ func testClangAttributes(t *testing.T, options *compileopts.Options) {
 		t.Fatalf("could not load target: %s", err)
 	}
 	config := compileopts.Config{
-		Options:      options,
-		Target:       target,
-		ClangHeaders: clangHeaderPath,
+		Options: options,
+		Target:  target,
 	}
 
 	// Create a very simple C input file.
@@ -98,7 +108,7 @@ func testClangAttributes(t *testing.T, options *compileopts.Options) {
 
 	// Compile this file using Clang.
 	outpath := filepath.Join(testDir, "test.bc")
-	flags := append([]string{"-c", "-emit-llvm", "-o", outpath, srcpath}, config.CFlags()...)
+	flags := append([]string{"-c", "-emit-llvm", "-o", outpath, srcpath}, config.CFlags(false)...)
 	if config.GOOS() == "darwin" {
 		// Silence some warnings that happen when testing GOOS=darwin on
 		// something other than MacOS.

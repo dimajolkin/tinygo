@@ -3,14 +3,41 @@
 package machine
 
 import (
-	"bytes"
 	"device/nrf"
-	"encoding/binary"
+	"internal/binary"
 	"runtime/interrupt"
 	"unsafe"
 )
 
 const deviceName = nrf.Device
+
+var deviceID [8]byte
+
+// DeviceID returns an identifier that is unique within
+// a particular chipset.
+//
+// The identity is one burnt into the MCU itself, or the
+// flash chip at time of manufacture.
+//
+// It's possible that two different vendors may allocate
+// the same DeviceID, so callers should take this into
+// account if needing to generate a globally unique id.
+//
+// The length of the hardware ID is vendor-specific, but
+// 8 bytes (64 bits) is common.
+func DeviceID() []byte {
+	words := make([]uint32, 2)
+	words[0] = nrf.FICR.DEVICEID[0].Get()
+	words[1] = nrf.FICR.DEVICEID[1].Get()
+
+	for i := 0; i < 8; i++ {
+		shift := (i % 4) * 8
+		w := i / 4
+		deviceID[i] = byte(words[w] >> shift)
+	}
+
+	return deviceID[:]
+}
 
 const (
 	PinInput         PinMode = (nrf.GPIO_PIN_CNF_DIR_Input << nrf.GPIO_PIN_CNF_DIR_Pos) | (nrf.GPIO_PIN_CNF_INPUT_Connect << nrf.GPIO_PIN_CNF_INPUT_Pos)
@@ -80,7 +107,7 @@ func (p Pin) Get() bool {
 func (p Pin) SetInterrupt(change PinChange, callback func(Pin)) error {
 	// Some variables to easily check whether a channel was already configured
 	// as an event channel for the given pin.
-	// This is not just an optimization, this is requred: the datasheet says
+	// This is not just an optimization, this is required: the datasheet says
 	// that configuring more than one channel for a given pin results in
 	// unpredictable behavior.
 	expectedConfigMask := uint32(nrf.GPIOTE_CONFIG_MODE_Msk | nrf.GPIOTE_CONFIG_PSEL_Msk)
@@ -246,17 +273,29 @@ func (i2c *I2C) Configure(config I2CConfig) error {
 	i2c.setPins(config.SCL, config.SDA)
 
 	i2c.mode = config.Mode
-
 	if i2c.mode == I2CModeController {
-		if config.Frequency >= 400*KHz {
-			i2c.Bus.FREQUENCY.Set(nrf.TWI_FREQUENCY_FREQUENCY_K400)
-		} else {
-			i2c.Bus.FREQUENCY.Set(nrf.TWI_FREQUENCY_FREQUENCY_K100)
-		}
+		i2c.SetBaudRate(config.Frequency)
 
 		i2c.enableAsController()
 	} else {
 		i2c.enableAsTarget()
+	}
+
+	return nil
+}
+
+// SetBaudRate sets the I2C frequency. It has the side effect of also
+// enabling the I2C hardware if disabled beforehand.
+//
+//go:inline
+func (i2c *I2C) SetBaudRate(br uint32) error {
+	switch {
+	case br >= 400*KHz:
+		i2c.Bus.SetFREQUENCY(nrf.TWI_FREQUENCY_FREQUENCY_K400)
+	case br >= 250*KHz:
+		i2c.Bus.SetFREQUENCY(nrf.TWI_FREQUENCY_FREQUENCY_K250)
+	default:
+		i2c.Bus.SetFREQUENCY(nrf.TWI_FREQUENCY_FREQUENCY_K100)
 	}
 
 	return nil
@@ -278,9 +317,9 @@ func (i2c *I2C) signalStop() error {
 
 var rngStarted = false
 
-// GetRNG returns 32 bits of non-deterministic random data based on internal thermal noise.
+// getRNG returns 32 bits of non-deterministic random data based on internal thermal noise.
 // According to Nordic's documentation, the random output is suitable for cryptographic purposes.
-func GetRNG() (ret uint32, err error) {
+func getRNG() (ret uint32, err error) {
 	// There's no apparent way to check the status of the RNG peripheral's task, so simply start it
 	// to avoid deadlocking while waiting for output.
 	if !rngStarted {
@@ -346,7 +385,7 @@ func (f flashBlockDevice) WriteAt(p []byte, off int64) (n int, err error) {
 	}
 
 	address := FlashDataStart() + uintptr(off)
-	padded := f.pad(p)
+	padded := flashPad(p, int(f.WriteBlockSize()))
 
 	waitWhileFlashBusy()
 
@@ -402,17 +441,6 @@ func (f flashBlockDevice) EraseBlocks(start, len int64) error {
 	}
 
 	return nil
-}
-
-// pad data if needed so it is long enough for correct byte alignment on writes.
-func (f flashBlockDevice) pad(p []byte) []byte {
-	overflow := int64(len(p)) % f.WriteBlockSize()
-	if overflow == 0 {
-		return p
-	}
-
-	padding := bytes.Repeat([]byte{0xff}, int(f.WriteBlockSize()-overflow))
-	return append(p, padding...)
 }
 
 func waitWhileFlashBusy() {

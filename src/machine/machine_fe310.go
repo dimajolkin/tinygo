@@ -26,6 +26,8 @@ const (
 func (p Pin) Configure(config PinConfig) {
 	sifive.GPIO0.INPUT_EN.SetBits(1 << uint8(p))
 	switch config.Mode {
+	case PinInput:
+		sifive.GPIO0.OUTPUT_EN.ClearBits(1 << uint8(p))
 	case PinOutput:
 		sifive.GPIO0.OUTPUT_EN.SetBits(1 << uint8(p))
 	case PinPWM:
@@ -138,7 +140,7 @@ type SPIConfig struct {
 }
 
 // Configure is intended to setup the SPI interface.
-func (spi SPI) Configure(config SPIConfig) error {
+func (spi *SPI) Configure(config SPIConfig) error {
 	// Use default pins if not set.
 	if config.SCK == 0 && config.SDO == 0 && config.SDI == 0 {
 		config.SCK = SPI0_SCK_PIN
@@ -195,7 +197,7 @@ func (spi SPI) Configure(config SPIConfig) error {
 }
 
 // Transfer writes/reads a single byte using the SPI interface.
-func (spi SPI) Transfer(w byte) (byte, error) {
+func (spi *SPI) Transfer(w byte) (byte, error) {
 	// wait for tx ready
 	for spi.Bus.TXDATA.HasBits(sifive.QSPI_TXDATA_FULL) {
 	}
@@ -229,9 +231,10 @@ type I2CConfig struct {
 	SDA       Pin
 }
 
+var i2cClockFrequency uint32 = 32000000
+
 // Configure is intended to setup the I2C interface.
 func (i2c *I2C) Configure(config I2CConfig) error {
-	var i2cClockFrequency uint32 = 32000000
 	if config.Frequency == 0 {
 		config.Frequency = 100 * KHz
 	}
@@ -241,7 +244,17 @@ func (i2c *I2C) Configure(config I2CConfig) error {
 		config.SCL = I2C0_SCL_PIN
 	}
 
-	var prescaler = i2cClockFrequency/(5*config.Frequency) - 1
+	i2c.SetBaudRate(config.Frequency)
+
+	config.SDA.Configure(PinConfig{Mode: PinI2C})
+	config.SCL.Configure(PinConfig{Mode: PinI2C})
+
+	return nil
+}
+
+// SetBaudRate sets the communication speed for I2C.
+func (i2c *I2C) SetBaudRate(br uint32) error {
+	var prescaler = i2cClockFrequency/(5*br) - 1
 
 	// disable controller before setting the prescale registers
 	i2c.Bus.CTR.ClearBits(sifive.I2C_CTR_EN)
@@ -252,9 +265,6 @@ func (i2c *I2C) Configure(config I2CConfig) error {
 
 	// enable controller
 	i2c.Bus.CTR.SetBits(sifive.I2C_CTR_EN)
-
-	config.SDA.Configure(PinConfig{Mode: PinI2C})
-	config.SCL.Configure(PinConfig{Mode: PinI2C})
 
 	return nil
 }

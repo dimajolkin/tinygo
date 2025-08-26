@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/tinygo-org/tinygo/compiler/llvmutil"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -24,6 +23,8 @@ func (b *builder) defineIntrinsicFunction() {
 		b.createMemoryCopyImpl()
 	case name == "runtime.memzero":
 		b.createMemoryZeroImpl()
+	case name == "runtime.stacksave":
+		b.createStackSaveImpl()
 	case name == "runtime.KeepAlive":
 		b.createKeepAliveImpl()
 	case strings.HasPrefix(name, "runtime/volatile.Load"):
@@ -48,12 +49,9 @@ func (b *builder) defineIntrinsicFunction() {
 func (b *builder) createMemoryCopyImpl() {
 	b.createFunctionStart(true)
 	fnName := "llvm." + b.fn.Name() + ".p0.p0.i" + strconv.Itoa(b.uintptrType.IntTypeWidth())
-	if llvmutil.Major() < 15 { // compatibility with LLVM 14
-		fnName = "llvm." + b.fn.Name() + ".p0i8.p0i8.i" + strconv.Itoa(b.uintptrType.IntTypeWidth())
-	}
 	llvmFn := b.mod.NamedFunction(fnName)
 	if llvmFn.IsNil() {
-		fnType := llvm.FunctionType(b.ctx.VoidType(), []llvm.Type{b.i8ptrType, b.i8ptrType, b.uintptrType, b.ctx.Int1Type()}, false)
+		fnType := llvm.FunctionType(b.ctx.VoidType(), []llvm.Type{b.dataPtrType, b.dataPtrType, b.uintptrType, b.ctx.Int1Type()}, false)
 		llvmFn = llvm.AddFunction(b.mod, fnName, fnType)
 	}
 	var params []llvm.Value
@@ -81,15 +79,20 @@ func (b *builder) createMemoryZeroImpl() {
 	b.CreateRetVoid()
 }
 
+// createStackSaveImpl creates a call to llvm.stacksave.p0 to read the current
+// stack pointer.
+func (b *builder) createStackSaveImpl() {
+	b.createFunctionStart(true)
+	sp := b.readStackPointer()
+	b.CreateRet(sp)
+}
+
 // Return the llvm.memset.p0.i8 function declaration.
 func (c *compilerContext) getMemsetFunc() llvm.Value {
 	fnName := "llvm.memset.p0.i" + strconv.Itoa(c.uintptrType.IntTypeWidth())
-	if llvmutil.Major() < 15 { // compatibility with LLVM 14
-		fnName = "llvm.memset.p0i8.i" + strconv.Itoa(c.uintptrType.IntTypeWidth())
-	}
 	llvmFn := c.mod.NamedFunction(fnName)
 	if llvmFn.IsNil() {
-		fnType := llvm.FunctionType(c.ctx.VoidType(), []llvm.Type{c.i8ptrType, c.ctx.Int8Type(), c.uintptrType, c.ctx.Int1Type()}, false)
+		fnType := llvm.FunctionType(c.ctx.VoidType(), []llvm.Type{c.dataPtrType, c.ctx.Int8Type(), c.uintptrType, c.ctx.Int1Type()}, false)
 		llvmFn = llvm.AddFunction(c.mod, fnName, fnType)
 	}
 	return llvmFn
@@ -111,11 +114,34 @@ func (b *builder) createKeepAliveImpl() {
 	//
 	// It should be portable to basically everything as the "r" register type
 	// exists basically everywhere.
-	asmType := llvm.FunctionType(b.ctx.VoidType(), []llvm.Type{b.i8ptrType}, false)
+	asmType := llvm.FunctionType(b.ctx.VoidType(), []llvm.Type{b.dataPtrType}, false)
 	asmFn := llvm.InlineAsm(asmType, "", "r", true, false, 0, false)
 	b.createCall(asmType, asmFn, []llvm.Value{pointerValue}, "")
 
 	b.CreateRetVoid()
+}
+
+// createAbiEscapeImpl implements the generic internal/abi.Escape function. It
+// currently only supports pointer types.
+func (b *builder) createAbiEscapeImpl() {
+	b.createFunctionStart(true)
+
+	// The first parameter is assumed to be a pointer. This is checked at the
+	// call site of createAbiEscapeImpl.
+	pointerValue := b.getValue(b.fn.Params[0], getPos(b.fn))
+
+	// Create an equivalent of the following C code, which is basically just a
+	// nop but ensures the pointerValue is kept alive:
+	//
+	//     __asm__ __volatile__("" : : "r"(pointerValue))
+	//
+	// It should be portable to basically everything as the "r" register type
+	// exists basically everywhere.
+	asmType := llvm.FunctionType(b.dataPtrType, []llvm.Type{b.dataPtrType}, false)
+	asmFn := llvm.InlineAsm(asmType, "", "=r,0", true, false, 0, false)
+	result := b.createCall(asmType, asmFn, []llvm.Value{pointerValue}, "")
+
+	b.CreateRet(result)
 }
 
 var mathToLLVMMapping = map[string]string{

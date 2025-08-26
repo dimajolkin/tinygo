@@ -137,6 +137,7 @@ func compileGoFileForTesting(t *testing.T, filename string) llvm.Module {
 		Scheduler:          config.Scheduler(),
 		AutomaticStackSize: config.AutomaticStackSize(),
 		Debug:              true,
+		PanicStrategy:      config.PanicStrategy(),
 	}
 	machine, err := compiler.NewTargetMachine(compilerConfig)
 	if err != nil {
@@ -145,7 +146,7 @@ func compileGoFileForTesting(t *testing.T, filename string) llvm.Module {
 	defer machine.Dispose()
 
 	// Load entire program AST into memory.
-	lprogram, err := loader.Load(config, filename, config.ClangHeaders, types.Config{
+	lprogram, err := loader.Load(config, filename, types.Config{
 		Sizes: compiler.Sizes(machine),
 	})
 	if err != nil {

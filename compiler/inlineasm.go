@@ -99,8 +99,8 @@ func (b *builder) createInlineAsmFull(instr *ssa.CallCommon) (llvm.Value, error)
 			case llvm.IntegerTypeKind:
 				constraints = append(constraints, "r")
 			case llvm.PointerTypeKind:
-				// Memory references require a type in LLVM 14, probably as a
-				// preparation for opaque pointers.
+				// Memory references require a type starting with LLVM 14,
+				// probably as a preparation for opaque pointers.
 				err = b.makeError(instr.Pos(), "support for pointer operands was dropped in TinyGo 0.23")
 				return s
 			default:
@@ -248,4 +248,16 @@ func (b *builder) emitCSROperation(call *ssa.CallCommon) (llvm.Value, error) {
 	default:
 		return llvm.Value{}, b.makeError(call.Pos(), "unknown CSR operation: "+name)
 	}
+}
+
+// Implement runtime/interrupt.Checkpoint.Save. It needs to be implemented
+// directly at the call site. If it isn't implemented directly at the call site
+// (but instead through a function call), it might result in an overwritten
+// stack in the non-jump return case.
+func (b *builder) createInterruptCheckpoint(ptr ssa.Value) llvm.Value {
+	addr := b.getValue(ptr, ptr.Pos())
+	b.createNilCheck(ptr, addr, "deref")
+	stackPointer := b.readStackPointer()
+	b.CreateStore(stackPointer, addr)
+	return b.createCheckpoint(addr)
 }

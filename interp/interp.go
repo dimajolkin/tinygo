@@ -3,11 +3,13 @@
 package interp
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/tinygo-org/tinygo/compiler/llvmutil"
 	"tinygo.org/x/go-llvm"
 )
 
@@ -21,9 +23,10 @@ type runner struct {
 	targetData    llvm.TargetData
 	builder       llvm.Builder
 	pointerSize   uint32                   // cached pointer size from the TargetData
-	i8ptrType     llvm.Type                // often used type so created in advance
+	dataPtrType   llvm.Type                // often used type so created in advance
 	uintptrType   llvm.Type                // equivalent to uintptr in Go
 	maxAlign      int                      // maximum alignment of an object, alignment of runtime.alloc() result
+	byteOrder     binary.ByteOrder         // big-endian or little-endian
 	debug         bool                     // log debug messages
 	pkgName       string                   // package name of the currently executing package
 	functionCache map[llvm.Value]*function // cache of compiled functions
@@ -38,6 +41,7 @@ func newRunner(mod llvm.Module, timeout time.Duration, debug bool) *runner {
 	r := runner{
 		mod:           mod,
 		targetData:    llvm.NewTargetData(mod.DataLayout()),
+		byteOrder:     llvmutil.ByteOrder(mod.Target()),
 		debug:         debug,
 		functionCache: make(map[llvm.Value]*function),
 		objects:       []object{{}},
@@ -46,13 +50,13 @@ func newRunner(mod llvm.Module, timeout time.Duration, debug bool) *runner {
 		timeout:       timeout,
 	}
 	r.pointerSize = uint32(r.targetData.PointerSize())
-	r.i8ptrType = llvm.PointerType(mod.Context().Int8Type(), 0)
+	r.dataPtrType = llvm.PointerType(mod.Context().Int8Type(), 0)
 	r.uintptrType = mod.Context().IntType(r.targetData.PointerSize() * 8)
-	r.maxAlign = r.targetData.PrefTypeAlignment(r.i8ptrType) // assume pointers are maximally aligned (this is not always the case)
+	r.maxAlign = r.targetData.PrefTypeAlignment(r.dataPtrType) // assume pointers are maximally aligned (this is not always the case)
 	return &r
 }
 
-// Dispose deallocates all alloated LLVM resources.
+// Dispose deallocates all allocated LLVM resources.
 func (r *runner) dispose() {
 	r.targetData.Dispose()
 	r.targetData = llvm.TargetData{}
@@ -126,7 +130,7 @@ func Run(mod llvm.Module, timeout time.Duration, debug bool) error {
 				mem.revert()
 				// Create a call to the package initializer (which was
 				// previously deleted).
-				i8undef := llvm.Undef(r.i8ptrType)
+				i8undef := llvm.Undef(r.dataPtrType)
 				r.builder.CreateCall(fn.GlobalValueType(), fn, []llvm.Value{i8undef}, "")
 				// Make sure that any globals touched by the package
 				// initializer, won't be accessed by later package initializers.
@@ -174,8 +178,7 @@ func Run(mod llvm.Module, timeout time.Duration, debug bool) error {
 			newGlobal.SetLinkage(obj.llvmGlobal.Linkage())
 			newGlobal.SetAlignment(obj.llvmGlobal.Alignment())
 			// TODO: copy debug info, unnamed_addr, ...
-			bitcast := llvm.ConstBitCast(newGlobal, obj.llvmGlobal.Type())
-			obj.llvmGlobal.ReplaceAllUsesWith(bitcast)
+			obj.llvmGlobal.ReplaceAllUsesWith(newGlobal)
 			name := obj.llvmGlobal.Name()
 			obj.llvmGlobal.EraseFromParentAsGlobal()
 			newGlobal.SetName(name)

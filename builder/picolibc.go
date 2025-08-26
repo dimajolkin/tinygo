@@ -3,13 +3,14 @@ package builder
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/tinygo-org/tinygo/goenv"
 )
 
-// Picolibc is a C library for bare metal embedded devices. It was originally
+// libPicolibc is a C library for bare metal embedded devices. It was originally
 // based on newlib.
-var Picolibc = Library{
+var libPicolibc = Library{
 	name: "picolibc",
 	makeHeaders: func(target, includeDir string) error {
 		f, err := os.Create(filepath.Join(includeDir, "picolibc.h"))
@@ -28,10 +29,12 @@ var Picolibc = Library{
 			"-D_HAVE_ALIAS_ATTRIBUTE",
 			"-DTINY_STDIO",
 			"-DPOSIX_IO",
+			"-DFORMAT_DEFAULT_INTEGER", // use __i_vfprintf and __i_vfscanf by default
 			"-D_IEEE_LIBM",
 			"-D__OBSOLETE_MATH_FLOAT=1", // use old math code that doesn't expect a FPU
 			"-D__OBSOLETE_MATH_DOUBLE=0",
 			"-D_WANT_IO_C99_FORMATS",
+			"-D__PICOLIBC_ERRNO_FUNCTION=__errno_location",
 			"-nostdlibinc",
 			"-isystem", newlibDir + "/libc/include",
 			"-I" + newlibDir + "/libc/tinystdio",
@@ -40,91 +43,23 @@ var Picolibc = Library{
 		}
 	},
 	sourceDir: func() string { return filepath.Join(goenv.Get("TINYGOROOT"), "lib/picolibc/newlib") },
-	librarySources: func(target string) ([]string, error) {
-		return picolibcSources, nil
+	librarySources: func(target string, _ bool) ([]string, error) {
+		sources := append([]string(nil), picolibcSources...)
+		if !strings.HasPrefix(target, "avr") {
+			// Small chips without long jumps can't compile many files (printf,
+			// pow, etc). Therefore exclude those source files for those chips.
+			// Unfortunately it's difficult to exclude only some chips, so this
+			// excludes those files on all AVR chips for now.
+			// More information:
+			// https://github.com/llvm/llvm-project/issues/67042
+			sources = append(sources, picolibcSourcesLarge...)
+		}
+		return sources, nil
 	},
 }
 
 var picolibcSources = []string{
 	"../../picolibc-stdio.c",
-
-	// srcs_tinystdio
-	"libc/tinystdio/asprintf.c",
-	"libc/tinystdio/bufio.c",
-	"libc/tinystdio/clearerr.c",
-	"libc/tinystdio/ecvt_r.c",
-	"libc/tinystdio/ecvt.c",
-	"libc/tinystdio/ecvtf_r.c",
-	"libc/tinystdio/ecvtf.c",
-	"libc/tinystdio/fcvt.c",
-	"libc/tinystdio/fcvt_r.c",
-	"libc/tinystdio/fcvtf.c",
-	"libc/tinystdio/fcvtf_r.c",
-	"libc/tinystdio/gcvt.c",
-	"libc/tinystdio/gcvtf.c",
-	"libc/tinystdio/fclose.c",
-	"libc/tinystdio/fdevopen.c",
-	"libc/tinystdio/feof.c",
-	"libc/tinystdio/ferror.c",
-	"libc/tinystdio/fflush.c",
-	"libc/tinystdio/fgetc.c",
-	"libc/tinystdio/fgets.c",
-	"libc/tinystdio/fileno.c",
-	"libc/tinystdio/filestrget.c",
-	"libc/tinystdio/filestrput.c",
-	"libc/tinystdio/filestrputalloc.c",
-	"libc/tinystdio/fmemopen.c",
-	"libc/tinystdio/fprintf.c",
-	"libc/tinystdio/fputc.c",
-	"libc/tinystdio/fputs.c",
-	"libc/tinystdio/fread.c",
-	//"libc/tinystdio/freopen.c", // crashes with AVR, see: https://github.com/picolibc/picolibc/pull/369
-	"libc/tinystdio/fscanf.c",
-	"libc/tinystdio/fseek.c",
-	"libc/tinystdio/fseeko.c",
-	"libc/tinystdio/ftell.c",
-	"libc/tinystdio/ftello.c",
-	"libc/tinystdio/fwrite.c",
-	"libc/tinystdio/getchar.c",
-	"libc/tinystdio/gets.c",
-	"libc/tinystdio/matchcaseprefix.c",
-	"libc/tinystdio/mktemp.c",
-	"libc/tinystdio/perror.c",
-	"libc/tinystdio/printf.c",
-	"libc/tinystdio/putchar.c",
-	"libc/tinystdio/puts.c",
-	"libc/tinystdio/rewind.c",
-	"libc/tinystdio/scanf.c",
-	"libc/tinystdio/setbuf.c",
-	"libc/tinystdio/setbuffer.c",
-	"libc/tinystdio/setlinebuf.c",
-	"libc/tinystdio/setvbuf.c",
-	"libc/tinystdio/snprintf.c",
-	"libc/tinystdio/sprintf.c",
-	"libc/tinystdio/snprintfd.c",
-	"libc/tinystdio/snprintff.c",
-	"libc/tinystdio/sprintff.c",
-	"libc/tinystdio/sprintfd.c",
-	"libc/tinystdio/sscanf.c",
-	"libc/tinystdio/strfromf.c",
-	"libc/tinystdio/strfromd.c",
-	"libc/tinystdio/strtof.c",
-	"libc/tinystdio/strtof_l.c",
-	"libc/tinystdio/strtod.c",
-	"libc/tinystdio/strtod_l.c",
-	"libc/tinystdio/ungetc.c",
-	"libc/tinystdio/vasprintf.c",
-	"libc/tinystdio/vfiprintf.c",
-	"libc/tinystdio/vfprintf.c",
-	"libc/tinystdio/vfprintff.c",
-	"libc/tinystdio/vfscanf.c",
-	"libc/tinystdio/vfiscanf.c",
-	"libc/tinystdio/vfscanff.c",
-	"libc/tinystdio/vprintf.c",
-	"libc/tinystdio/vscanf.c",
-	"libc/tinystdio/vsscanf.c",
-	"libc/tinystdio/vsnprintf.c",
-	"libc/tinystdio/vsprintf.c",
 
 	"libc/string/bcmp.c",
 	"libc/string/bcopy.c",
@@ -229,6 +164,87 @@ var picolibcSources = []string{
 	"libc/string/wmempcpy.c",
 	"libc/string/wmemset.c",
 	"libc/string/xpg_strerror_r.c",
+}
+
+// Parts of picolibc that are too large for small AVRs.
+var picolibcSourcesLarge = []string{
+	// srcs_tinystdio
+	"libc/tinystdio/asprintf.c",
+	"libc/tinystdio/bufio.c",
+	"libc/tinystdio/clearerr.c",
+	"libc/tinystdio/ecvt_r.c",
+	"libc/tinystdio/ecvt.c",
+	"libc/tinystdio/ecvtf_r.c",
+	"libc/tinystdio/ecvtf.c",
+	"libc/tinystdio/fcvt.c",
+	"libc/tinystdio/fcvt_r.c",
+	"libc/tinystdio/fcvtf.c",
+	"libc/tinystdio/fcvtf_r.c",
+	"libc/tinystdio/gcvt.c",
+	"libc/tinystdio/gcvtf.c",
+	"libc/tinystdio/fclose.c",
+	"libc/tinystdio/fdevopen.c",
+	"libc/tinystdio/feof.c",
+	"libc/tinystdio/ferror.c",
+	"libc/tinystdio/fflush.c",
+	"libc/tinystdio/fgetc.c",
+	"libc/tinystdio/fgets.c",
+	"libc/tinystdio/fileno.c",
+	"libc/tinystdio/filestrget.c",
+	"libc/tinystdio/filestrput.c",
+	"libc/tinystdio/filestrputalloc.c",
+	"libc/tinystdio/fmemopen.c",
+	"libc/tinystdio/fprintf.c",
+	"libc/tinystdio/fputc.c",
+	"libc/tinystdio/fputs.c",
+	"libc/tinystdio/fread.c",
+	//"libc/tinystdio/freopen.c", // crashes with AVR, see: https://github.com/picolibc/picolibc/pull/369
+	"libc/tinystdio/fscanf.c",
+	"libc/tinystdio/fseek.c",
+	"libc/tinystdio/fseeko.c",
+	"libc/tinystdio/ftell.c",
+	"libc/tinystdio/ftello.c",
+	"libc/tinystdio/fwrite.c",
+	"libc/tinystdio/getchar.c",
+	"libc/tinystdio/gets.c",
+	"libc/tinystdio/matchcaseprefix.c",
+	"libc/tinystdio/mktemp.c",
+	"libc/tinystdio/perror.c",
+	"libc/tinystdio/printf.c",
+	"libc/tinystdio/putchar.c",
+	"libc/tinystdio/puts.c",
+	"libc/tinystdio/rewind.c",
+	"libc/tinystdio/scanf.c",
+	"libc/tinystdio/setbuf.c",
+	"libc/tinystdio/setbuffer.c",
+	"libc/tinystdio/setlinebuf.c",
+	"libc/tinystdio/setvbuf.c",
+	"libc/tinystdio/snprintf.c",
+	"libc/tinystdio/sprintf.c",
+	"libc/tinystdio/snprintfd.c",
+	"libc/tinystdio/snprintff.c",
+	"libc/tinystdio/sprintff.c",
+	"libc/tinystdio/sprintfd.c",
+	"libc/tinystdio/sscanf.c",
+	"libc/tinystdio/strfromf.c",
+	"libc/tinystdio/strfromd.c",
+	"libc/tinystdio/strtof.c",
+	"libc/tinystdio/strtof_l.c",
+	"libc/tinystdio/strtod.c",
+	"libc/tinystdio/strtod_l.c",
+	"libc/tinystdio/ungetc.c",
+	"libc/tinystdio/vasprintf.c",
+	"libc/tinystdio/vfiprintf.c",
+	"libc/tinystdio/vfprintf.c",
+	"libc/tinystdio/vfprintff.c",
+	"libc/tinystdio/vfscanf.c",
+	"libc/tinystdio/vfiscanf.c",
+	"libc/tinystdio/vfscanff.c",
+	"libc/tinystdio/vprintf.c",
+	"libc/tinystdio/vscanf.c",
+	"libc/tinystdio/vsscanf.c",
+	"libc/tinystdio/vsnprintf.c",
+	"libc/tinystdio/vsprintf.c",
 
 	"libm/common/sf_finite.c",
 	"libm/common/sf_copysign.c",
@@ -323,6 +339,12 @@ var picolibcSources = []string{
 	"libm/common/math_err_may_uflow.c",
 	"libm/common/math_err_check_uflow.c",
 	"libm/common/math_err_check_oflow.c",
+	"libm/common/math_errf_divzerof.c",
+	"libm/common/math_errf_invalidf.c",
+	"libm/common/math_errf_may_uflowf.c",
+	"libm/common/math_errf_oflowf.c",
+	"libm/common/math_errf_uflowf.c",
+	"libm/common/math_errf_with_errnof.c",
 	"libm/common/math_inexact.c",
 	"libm/common/math_inexactf.c",
 	"libm/common/log.c",

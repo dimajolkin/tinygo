@@ -1,6 +1,6 @@
 # TinyGo - Go compiler for small places
 
-[![Linux](https://github.com/tinygo-org/tinygo/actions/workflows/linux.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/linux.yml) [![macOS](https://github.com/tinygo-org/tinygo/actions/workflows/build-macos.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/build-macos.yml) [![Windows](https://github.com/tinygo-org/tinygo/actions/workflows/windows.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/windows.yml) [![Docker](https://github.com/tinygo-org/tinygo/actions/workflows/docker.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/docker.yml) [![CircleCI](https://circleci.com/gh/tinygo-org/tinygo/tree/dev.svg?style=svg)](https://circleci.com/gh/tinygo-org/tinygo/tree/dev)
+[![Linux](https://github.com/tinygo-org/tinygo/actions/workflows/linux.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/linux.yml) [![macOS](https://github.com/tinygo-org/tinygo/actions/workflows/build-macos.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/build-macos.yml) [![Windows](https://github.com/tinygo-org/tinygo/actions/workflows/windows.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/windows.yml) [![Docker](https://github.com/tinygo-org/tinygo/actions/workflows/docker.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/docker.yml) [![Nix](https://github.com/tinygo-org/tinygo/actions/workflows/nix.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/nix.yml) [![CircleCI](https://circleci.com/gh/tinygo-org/tinygo/tree/dev.svg?style=svg)](https://circleci.com/gh/tinygo-org/tinygo/tree/dev)
 
 TinyGo is a Go compiler intended for use in small places such as microcontrollers, WebAssembly (wasm/wasi), and command-line tools.
 
@@ -41,27 +41,29 @@ tinygo flash -target arduino examples/blinky1
 
 TinyGo is very useful for compiling programs both for use in browsers (WASM) as well as for use on servers and other edge devices (WASI).
 
-TinyGo programs can run in Fastly Compute@Edge (https://developer.fastly.com/learning/compute/go/), Fermyon Spin (https://developer.fermyon.com/spin/go-components), wazero (https://wazero.io/languages/tinygo/) and many other WebAssembly runtimes.
+TinyGo programs can run in [Fastly Compute](https://www.fastly.com/documentation/guides/compute/go/), [Fermyon Spin](https://developer.fermyon.com/spin/go-components), [wazero](https://wazero.io/languages/tinygo/) and many other WebAssembly runtimes.
 
 Here is a small TinyGo program for use by a WASI host application:
 
 ```go
 package main
 
-//go:wasm-module yourmodulename
-//export add
+//go:wasmexport add
 func add(x, y uint32) uint32 {
 	return x + y
 }
-
-// main is required for the `wasi` target, even if it isn't used.
-func main() {}
 ```
 
-This compiles the above TinyGo program for use on any WASI runtime:
+This compiles the above TinyGo program for use on any WASI Preview 1 runtime:
 
 ```shell
-tinygo build -o main.wasm -target=wasi main.go
+tinygo build -buildmode=c-shared -o add.wasm -target=wasip1 add.go
+```
+
+You can also use the same syntax as Go 1.24+:
+
+```shell
+GOARCH=wasip1 GOOS=wasm tinygo build -buildmode=c-shared -o add.wasm add.go
 ```
 
 ## Installation

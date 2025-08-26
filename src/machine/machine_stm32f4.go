@@ -6,13 +6,15 @@ package machine
 
 import (
 	"device/stm32"
-	"encoding/binary"
 	"errors"
+	"internal/binary"
 	"math/bits"
 	"runtime/interrupt"
 	"runtime/volatile"
 	"unsafe"
 )
+
+var deviceIDAddr = []uintptr{0x1FFF7A10, 0x1FFF7A14, 0x1FFF7A18}
 
 const (
 	PA0  = portA + 0
@@ -670,17 +672,17 @@ type SPI struct {
 	AltFuncSelector uint8
 }
 
-func (spi SPI) config8Bits() {
+func (spi *SPI) config8Bits() {
 	// no-op on this series
 }
 
-func (spi SPI) configurePins(config SPIConfig) {
+func (spi *SPI) configurePins(config SPIConfig) {
 	config.SCK.ConfigureAltFunc(PinConfig{Mode: PinModeSPICLK}, spi.AltFuncSelector)
 	config.SDO.ConfigureAltFunc(PinConfig{Mode: PinModeSPISDO}, spi.AltFuncSelector)
 	config.SDI.ConfigureAltFunc(PinConfig{Mode: PinModeSPISDI}, spi.AltFuncSelector)
 }
 
-func (spi SPI) getBaudRate(config SPIConfig) uint32 {
+func (spi *SPI) getBaudRate(config SPIConfig) uint32 {
 	var clock uint32
 	switch spi.Bus {
 	case stm32.SPI1:

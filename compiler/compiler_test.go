@@ -91,14 +91,12 @@ func TestCompiler(t *testing.T) {
 			}
 
 			// Optimize IR a little.
-			funcPasses := llvm.NewFunctionPassManagerForModule(mod)
-			defer funcPasses.Dispose()
-			funcPasses.AddInstructionCombiningPass()
-			funcPasses.InitializeFunc()
-			for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
-				funcPasses.RunFunc(fn)
+			passOptions := llvm.NewPassBuilderOptions()
+			defer passOptions.Dispose()
+			err = mod.RunPasses("instcombine", llvm.TargetMachine{}, passOptions)
+			if err != nil {
+				t.Error(err)
 			}
-			funcPasses.FinalizeFunc()
 
 			outFilePrefix := tc.file[:len(tc.file)-3]
 			if tc.target != "" {
@@ -169,9 +167,9 @@ func filterIrrelevantIRLines(lines []string) []string {
 		if strings.HasPrefix(line, "source_filename = ") {
 			continue
 		}
-		if llvmVersion < 14 && strings.HasPrefix(line, "target datalayout = ") {
+		if llvmVersion < 15 && strings.HasPrefix(line, "target datalayout = ") {
 			// The datalayout string may vary betewen LLVM versions.
-			// Right now test outputs are for LLVM 14 and higher.
+			// Right now test outputs are for LLVM 15 and higher.
 			continue
 		}
 		out = append(out, line)
@@ -245,7 +243,7 @@ func testCompilePackage(t *testing.T, options *compileopts.Options, file string)
 	defer machine.Dispose()
 
 	// Load entire program AST into memory.
-	lprogram, err := loader.Load(config, "./testdata/"+file, config.ClangHeaders, types.Config{
+	lprogram, err := loader.Load(config, "./testdata/"+file, types.Config{
 		Sizes: Sizes(machine),
 	})
 	if err != nil {
