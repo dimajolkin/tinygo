@@ -7,10 +7,6 @@
 [submodule "lib/avr"]
 	path = lib/avr
 	url = https://github.com/avr-rust/avr-mcu.git
-[submodule "lib/cmsis-svd"]
-	path = lib/cmsis-svd
-	url = https://github.com/cmsis-svd/cmsis-svd-data.git
-	branch = main
 [submodule "lib/wasi-libc"]
 	path = lib/wasi-libc
 	url = https://github.com/WebAssembly/wasi-libc
@@ -41,3 +37,7 @@
 [submodule "lib/bdwgc"]
 	path = lib/bdwgc
 	url = https://github.com/ivmai/bdwgc.git
+[submodule "lib/cmsis-svd"]
+	path = lib/cmsis-svd
+	url = https://github.com/cmsis-svd/cmsis-svd-data.git
+	branch = main

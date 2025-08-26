@@ -12,6 +12,14 @@
     .long _stack_top
 .global call_start_cpu0
 call_start_cpu0:
+    // At this point:
+    // - The ROM bootloader is finished and has jumped to here.
+    // - We're running from IRAM: both IRAM and DRAM segments have been loaded
+    //   by the ROM bootloader.
+    // - We have a usable stack (but not the one we would like to use).
+    // - No flash mappings (MMU) are set up yet for ESP32S3.
+    // Note: ROM bootloader should have initialized basic flash mapping
+
     // We need to set the stack pointer to a different value. This is somewhat
     // complicated in the Xtensa architecture. The code below is a modified
     // version of the following code:
@@ -49,6 +57,8 @@ call_start_cpu0:
 
     // Jump to the runtime start function written in Go.
     call4 main
+
+
 
 .section .text.tinygo_scanCurrentStack
 .global tinygo_scanCurrentStack

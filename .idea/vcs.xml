@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/lib/CMSIS" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/lib/avr" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/lib/bdwgc" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/lib/binaryen" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/lib/binaryen/third_party/googletest" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/lib/cmsis-svd" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/lib/macos-minimal-sdk" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/lib/mingw-w64" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/lib/musl" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/lib/nrfx" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/lib/picolibc" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/lib/stm32-svd" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/lib/stm32-svd/stm32-rs" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/lib/wasi-cli" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/lib/wasi-libc" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/lib/wasi-libc/tools/wasi-headers/WASI" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/src/net" vcs="Git" />
+  </component>
+</project>

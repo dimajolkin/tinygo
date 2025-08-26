@@ -448,6 +448,32 @@ func Flash(pkgName, port, outpath string, options *compileopts.Options) error {
 			}
 		}
 
+		// Check if we need to erase flash before flashing (for ESP32S3 and similar)
+		if config.Target.EraseBeforeFlash != nil && *config.Target.EraseBeforeFlash {
+			// Build erase command based on the flash command tool
+			fmt.Println("Erasing flash before flashing...")
+
+			// Extract chip type from flash command for ESP targets
+			chipType := "esp32s3" // default for now, could be made configurable
+			if strings.Contains(flashCmd, "esp32c3") {
+				chipType = "esp32c3"
+			} else if strings.Contains(flashCmd, "esp32 ") {
+				chipType = "esp32"
+			}
+
+			// Erase only the application area, not the entire flash (to preserve bootloader)
+			eraseCmdList := []string{"esptool.py", "--chip=" + chipType, "--port", port, "erase_region", "0x1000", "0x100000"}
+
+			cmd := executeCommand(config.Options, eraseCmdList[0], eraseCmdList[1:]...)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			cmd.Dir = goenv.Get("TINYGOROOT")
+			err = cmd.Run()
+			if err != nil {
+				return &commandError{"failed to erase flash", "", err}
+			}
+		}
+
 		// Fill in fields in the command template.
 		fileToken := "{" + fileExt[1:] + "}"
 		for i, arg := range flashCmdList {

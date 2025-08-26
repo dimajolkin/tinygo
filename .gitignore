@@ -2,6 +2,7 @@
 .vscode
 go.work
 go.work.sum
+.idea
 
 docs/_build
 src/device/avr/*.go

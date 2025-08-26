@@ -100,16 +100,28 @@ func makeESPFirmareImage(infile, outfile, format string) error {
 	chip_id := map[string]uint16{
 		"esp32":   0x0000,
 		"esp32c3": 0x0005,
+		"esp32s3": 0x0009,
 	}[chip]
 
 	// Image header.
 	switch chip {
-	case "esp32", "esp32c3":
+	case "esp32", "esp32c3", "esp32s3":
 		// Header format:
 		// https://github.com/espressif/esp-idf/blob/v4.3/components/bootloader_support/include/esp_app_format.h#L71
 		// Note: not adding a SHA256 hash as the binary is modified by
 		// esptool.py while flashing and therefore the hash won't be valid
 		// anymore.
+		// Set appropriate min_chip_rev based on chip type
+		var min_chip_rev uint8
+		switch chip {
+		case "esp32s3":
+			min_chip_rev = 0 // Use 0 for compatibility with all ESP32S3 revisions
+		case "esp32", "esp32c3":
+			min_chip_rev = 0
+		default:
+			min_chip_rev = 0
+		}
+
 		binary.Write(outf, binary.LittleEndian, struct {
 			magic          uint8
 			segment_count  uint8
@@ -130,6 +142,7 @@ func makeESPFirmareImage(infile, outfile, format string) error {
 			entry_addr:     uint32(inf.Entry),
 			wp_pin:         0xEE, // disable WP pin
 			chip_id:        chip_id,
+			min_chip_rev:   min_chip_rev,
 			hash_appended:  true, // add a SHA256 hash
 		})
 	case "esp8266":

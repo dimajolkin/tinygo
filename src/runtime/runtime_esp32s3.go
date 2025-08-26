@@ -4,6 +4,7 @@ package runtime
 
 import (
 	"device/esp"
+	"machine"
 )
 
 // This is the function called on startup after the flash (IROM/DROM) is
@@ -24,9 +25,9 @@ func main() {
 	// esp_cpu_configure_region_protection in ESP-IDF.
 
 	// Disable RTC watchdog.
-	esp.RTC_CNTL.RTC_WDTWPROTECT.Set(0x50D83AA1)
-	esp.RTC_CNTL.RTC_WDTCONFIG0.Set(0)
-	esp.RTC_CNTL.RTC_WDTWPROTECT.Set(0x0) // Re-enable write protect
+	esp.RTC_CNTL.SetWDTWPROTECT(0x50D83AA1)
+	esp.RTC_CNTL.SetWDTCONFIG0_WDT_EN(0)
+	esp.RTC_CNTL.SetWDTWPROTECT(0x0) // Re-enable write protect
 
 	// Disable Timer 0 watchdog.
 	esp.TIMG1.WDTWPROTECT.Set(0x50D83AA1) // write protect
@@ -38,22 +39,26 @@ func main() {
 	esp.TIMG0.WDTWPROTECT.Set(0x0)        // Re-enable write protect
 
 	// Disable super watchdog.
-	esp.RTC_CNTL.RTC_SWD_WPROTECT.Set(0x8F1D312A)
-	esp.RTC_CNTL.RTC_SWD_CONF.Set(esp.RTC_CNTL_RTC_SWD_CONF_SWD_DISABLE)
-	esp.RTC_CNTL.RTC_SWD_WPROTECT.Set(0x0) // Re-enable write protect
+	esp.RTC_CNTL.SetSWD_WPROTECT(0x8F1D312A)
+	esp.RTC_CNTL.SetSWD_CONF_SWD_DISABLE(1)
+	esp.RTC_CNTL.SetSWD_WPROTECT(0x0) // Re-enable write protect
 
-	// // Change CPU frequency from 20MHz to 80MHz, by switching from the XTAL to
-	// // the PLL clock source (see table "CPU Clock Frequency" in the reference
-	// // manual).
-	// esp.SYSTEM.SYSCLK_CONF.Set(1 << esp.SYSTEM_SYSCLK_CONF_SOC_CLK_SEL_Pos)
+	// Change CPU frequency from 20MHz to 80MHz, by switching from the XTAL to
+	// the PLL clock source (see table "CPU Clock Frequency" in the reference
+	// manual).
+	esp.SYSTEM.SYSCLK_CONF.Set(1 << esp.SYSTEM_SYSCLK_CONF_SOC_CLK_SEL_Pos)
 
-	// // Change CPU frequency from 80MHz to 160MHz by setting SYSTEM_CPUPERIOD_SEL
-	// // to 1 (see table "CPU Clock Frequency" in the reference manual).
-	// // Note: we might not want to set SYSTEM_CPU_WAIT_MODE_FORCE_ON to save
-	// // power. It is set here to keep the default on reset.
-	// esp.SYSTEM.CPU_PER_CONF.Set(esp.SYSTEM_CPU_PER_CONF_CPU_WAIT_MODE_FORCE_ON | esp.SYSTEM_CPU_PER_CONF_PLL_FREQ_SEL | 1<<esp.SYSTEM_CPU_PER_CONF_CPUPERIOD_SEL_Pos)
+	// Change CPU frequency from 80MHz to 160MHz by setting SYSTEM_CPUPERIOD_SEL
+	// to 1 (see table "CPU Clock Frequency" in the reference manual).
+	// Note: we might not want to set SYSTEM_CPU_WAIT_MODE_FORCE_ON to save
+	// power. It is set here to keep the default on reset.
+	esp.SYSTEM.CPU_PER_CONF.Set(esp.SYSTEM_CPU_PER_CONF_CPU_WAIT_MODE_FORCE_ON | esp.SYSTEM_CPU_PER_CONF_PLL_FREQ_SEL | 1<<esp.SYSTEM_CPU_PER_CONF_CPUPERIOD_SEL_Pos)
 
 	clearbss()
+
+	// Initialize UART for println/debug output.
+	// This is critical for ESP32S3 to see any output
+	machine.InitSerial()
 
 	// Initialize main system timer used for time.Now.
 	initTimer()
