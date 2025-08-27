@@ -1,5 +1,5 @@
 {
-	"llvm-target": "xtensa",
+	"llvm-target": "xtensa-esp32-elf",
 	"goos": "linux",
 	"goarch": "arm",
 	"build-tags": ["xtensa", "baremetal", "linux", "arm"],

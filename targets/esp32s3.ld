@@ -48,6 +48,8 @@ SECTIONS
      */
     .rodata : ALIGN(4)
     {
+        /* ESP app descriptor must be at the beginning for bootloader to find it */
+        *(.rodata.esp_app_desc)
         *(.rodata)
         *(.rodata.*)
     } >DRAM

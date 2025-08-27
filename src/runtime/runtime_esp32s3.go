@@ -5,6 +5,7 @@ package runtime
 import (
 	"device/esp"
 	"machine"
+	"unsafe"
 )
 
 // This is the function called on startup after the flash (IROM/DROM) is
@@ -83,3 +84,12 @@ var _sbss [0]byte
 
 //go:extern _ebss
 var _ebss [0]byte
+
+// Reference to assembly-defined app descriptor to force its inclusion
+//go:extern esp_app_desc
+var esp_app_desc [32]byte
+
+//go:export get_app_desc_ptr
+func get_app_desc_ptr() uintptr {
+	return uintptr(unsafe.Pointer(&esp_app_desc[0]))
+}

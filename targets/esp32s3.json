@@ -12,7 +12,8 @@
 	"linkerscript": "targets/esp32s3.ld",
 	"extra-files": [
 		"src/device/esp/esp32s3.S",
-		"src/internal/task/task_stack_esp32.S"
+		"src/internal/task/task_stack_esp32.S",
+		"src/runtime/esp_app_desc.S"
 	],
 	"binary-format": "esp32s3",
 	"flash-command": "esptool.py --chip=esp32s3 --port {port} write_flash --flash_mode dio --flash_freq 40m --flash_size 4MB 0x10000 {bin}",

@@ -143,7 +143,8 @@ func makeESPFirmareImage(infile, outfile, format string) error {
 			wp_pin:         0xEE, // disable WP pin
 			chip_id:        chip_id,
 			min_chip_rev:   min_chip_rev,
-			hash_appended:  true, // add a SHA256 hash
+			reserved:       [8]uint8{0, 0, 0, 0, 0, 0, 0, 0}, // explicitly zero reserved field
+			hash_appended:  true,                             // add a SHA256 hash
 		})
 	case "esp8266":
 		// Header format:
