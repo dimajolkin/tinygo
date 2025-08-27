@@ -65,6 +65,80 @@ func makeESPFirmareImage(infile, outfile, format string) error {
 	// Sort the segments by address. This is what esptool does too.
 	sort.SliceStable(segments, func(i, j int) bool { return segments[i].addr < segments[j].addr })
 
+	// TEMPORARILY DISABLE ESP App Descriptor to test basic TinyGo runtime
+	// Modify segments for ESP32S3 to include ESP App Descriptor BEFORE checksum calculation
+	// ONLY for esp32s3 binary format, NOT for regular esp32 format used by esptool elf2image
+	if false && format == "esp32s3" {
+		// Find .rodata segment and replace its content with ESP App Descriptor
+		for i, segment := range segments {
+			if segment.addr == 0x3c000020 { // This is .rodata segment
+				// Create ESP App Descriptor
+				appDesc := &bytes.Buffer{}
+
+				// Write ESP App Descriptor structure (esp_app_desc_t)
+				// Magic word: 0xABCD5432
+				binary.Write(appDesc, binary.LittleEndian, uint32(0xABCD5432))
+				// secure_version
+				binary.Write(appDesc, binary.LittleEndian, uint32(0))
+				// reserv1[2]
+				binary.Write(appDesc, binary.LittleEndian, [2]uint32{0, 0})
+
+				// version[32] - app version string
+				version := make([]byte, 32)
+				copy(version, "1")
+				appDesc.Write(version)
+
+				// project_name[32] - project name
+				projectName := make([]byte, 32)
+				copy(projectName, "TinyGo App")
+				appDesc.Write(projectName)
+
+				// time[16] - compile time
+				timeStr := make([]byte, 16)
+				copy(timeStr, "00:00:00")
+				appDesc.Write(timeStr)
+
+				// date[16] - compile date
+				dateStr := make([]byte, 16)
+				copy(dateStr, "Jan  1 2024")
+				appDesc.Write(dateStr)
+
+				// idf_ver[32] - IDF version
+				idfVer := make([]byte, 32)
+				copy(idfVer, "TinyGo-Compat")
+				appDesc.Write(idfVer)
+
+				// app_elf_sha256[32] - SHA256 of app ELF
+				appDesc.Write(make([]byte, 32))
+
+				// reserv2[20] - reserved fields
+				appDesc.Write(make([]byte, 20))
+
+				// min_efuse_blk_rev_full - critical for ESP32S3 compatibility
+				binary.Write(appDesc, binary.LittleEndian, uint32(0x00))
+
+				// max_efuse_blk_rev_full - set to 0 like ESP-IDF
+				binary.Write(appDesc, binary.LittleEndian, uint32(0x00000000))
+
+				// Replace segment content with App Descriptor + original content
+				newData := appDesc.Bytes()
+
+				// If original segment is larger, append remaining original content
+				if len(segment.data) > len(newData) {
+					newData = append(newData, segment.data[len(newData):]...)
+				}
+
+				// Align to 4 bytes
+				for len(newData)%4 != 0 {
+					newData = append(newData, 0)
+				}
+
+				segments[i].data = newData
+				break
+			}
+		}
+	}
+
 	// Calculate checksum over the segment data. This is used in the image
 	// footer.
 	checksum := uint8(0xef)

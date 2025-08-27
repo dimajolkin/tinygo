@@ -482,17 +482,61 @@ func Flash(pkgName, port, outpath string, options *compileopts.Options) error {
 			flashCmdList[i] = arg
 		}
 
-		// Execute the command.
-		if len(flashCmdList) < 2 {
-			return fmt.Errorf("invalid flash command: %#v", flashCmd)
+		// Special handling for ESP32-S3: flash bootloader, partition table, and app
+		isESP32S3 := false
+		buildTags := config.BuildTags()
+		for _, tag := range buildTags {
+			if tag == "esp32s3" {
+				isESP32S3 = true
+				break
+			}
 		}
-		cmd := executeCommand(config.Options, flashCmdList[0], flashCmdList[1:]...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		cmd.Dir = goenv.Get("TINYGOROOT")
-		err = cmd.Run()
-		if err != nil {
-			return &commandError{"failed to flash", result.Binary, err}
+		if isESP32S3 {
+			fmt.Println("ESP32-S3 detected: flashing bootloader, partition table, and application...")
+
+			// Path to ESP32-S3 system files
+			tinygoRoot := goenv.Get("TINYGOROOT")
+			bootloaderPath := filepath.Join(tinygoRoot, "targets", "esp32s3-files", "bootloader.bin")
+			partitionTablePath := filepath.Join(tinygoRoot, "targets", "esp32s3-files", "partition-table.bin")
+
+			// Check if system files exist
+			if _, err := os.Stat(bootloaderPath); os.IsNotExist(err) {
+				return fmt.Errorf("ESP32-S3 bootloader not found at %s", bootloaderPath)
+			}
+			if _, err := os.Stat(partitionTablePath); os.IsNotExist(err) {
+				return fmt.Errorf("ESP32-S3 partition table not found at %s", partitionTablePath)
+			}
+
+			// Create ESP32-S3 flash command with all components
+			esp32s3FlashCmd := []string{
+				"esptool.py", "--chip=esp32s3", "--port", port, "--baud", "921600",
+				"write_flash", "-z",
+				"0x0", bootloaderPath,
+				"0x8000", partitionTablePath,
+				"0x10000", result.Binary,
+			}
+
+			cmd := executeCommand(config.Options, esp32s3FlashCmd[0], esp32s3FlashCmd[1:]...)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			cmd.Dir = tinygoRoot
+			err = cmd.Run()
+			if err != nil {
+				return &commandError{"failed to flash ESP32-S3", result.Binary, err}
+			}
+		} else {
+			// Execute the standard command for other targets
+			if len(flashCmdList) < 2 {
+				return fmt.Errorf("invalid flash command: %#v", flashCmd)
+			}
+			cmd := executeCommand(config.Options, flashCmdList[0], flashCmdList[1:]...)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			cmd.Dir = goenv.Get("TINYGOROOT")
+			err = cmd.Run()
+			if err != nil {
+				return &commandError{"failed to flash", result.Binary, err}
+			}
 		}
 	case "msd":
 		// this flashing method copies the binary data to a Mass Storage Device (msd)

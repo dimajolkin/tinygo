@@ -8,8 +8,8 @@ MEMORY
     IRAM (x)  : ORIGIN = 0x40378000, LENGTH = 416K /* Internal SRAM 1 (instruction bus) */
 
     /* Note: DROM and IROM below are actually in the same 32M address space. */
-    DROM (r)  : ORIGIN = 0x3C000000, LENGTH = 32M /* Data bus (read-only) */
-    IROM (rx) : ORIGIN = 0x42000000, LENGTH = 32M /* Instruction bus */
+    DROM (r)  : ORIGIN = 0x3C000000, LENGTH = 32M /* Data bus (read-only) - Flash */
+    IROM (rx) : ORIGIN = 0x42000000, LENGTH = 32M /* Instruction bus - Flash */
 }
 
 /* The entry point. It is set in the image flashed to the chip, so must be
@@ -19,6 +19,25 @@ ENTRY(call_start_cpu0)
 
 SECTIONS
 {
+    /* Dummy section to make sure the .rodata section starts exactly behind the
+     * image header.
+     */
+    .rodata_dummy (NOLOAD): ALIGN(4)
+    {
+        . += 0x18; /* image header at start of flash: esp_image_header_t */
+        . += 0x8;  /* DROM segment header (8 bytes) */
+    } > DROM
+
+    /* Constant global variables, stored in DROM (Flash).
+     * ESP App Descriptor must be placed first for ESP32-S3 bootloader compatibility.
+     */
+    .rodata : ALIGN(4)
+    {
+        *(.rodata_desc)  /* ESP App descriptor - MUST be first */
+        *(.rodata*)
+        . = ALIGN (4);
+    } >DROM
+
     /* Constant literals and code. Loaded into IRAM for now. Eventually, most
      * code should be executed directly from flash.
      * Note that literals must be before code for the l32r instruction to work.
@@ -39,19 +58,6 @@ SECTIONS
         . = ALIGN(16);
         . += _stack_size;
         _stack_top = .;
-    } >DRAM
-
-    /* Constant global variables.
-     * They are loaded in DRAM for ease of use. Eventually they should be stored
-     * in flash and loaded directly from there but they're kept in RAM to make
-     * sure they can always be accessed (even in interrupts).
-     */
-    .rodata : ALIGN(4)
-    {
-        /* ESP app descriptor must be at the beginning for bootloader to find it */
-        *(.rodata.esp_app_desc)
-        *(.rodata)
-        *(.rodata.*)
     } >DRAM
 
     /* Mutable global variables.
