@@ -65,10 +65,10 @@ func makeESPFirmareImage(infile, outfile, format string) error {
 	// Sort the segments by address. This is what esptool does too.
 	sort.SliceStable(segments, func(i, j int) bool { return segments[i].addr < segments[j].addr })
 
-	// TEMPORARILY DISABLE ESP App Descriptor to test basic TinyGo runtime
+	// Enable ESP App Descriptor for ESP32S3 bootloader compatibility
 	// Modify segments for ESP32S3 to include ESP App Descriptor BEFORE checksum calculation
 	// ONLY for esp32s3 binary format, NOT for regular esp32 format used by esptool elf2image
-	if false && format == "esp32s3" {
+	if format == "esp32s3" {
 		// Find .rodata segment and replace its content with ESP App Descriptor
 		for i, segment := range segments {
 			if segment.addr == 0x3c000020 { // This is .rodata segment
@@ -115,10 +115,11 @@ func makeESPFirmareImage(infile, outfile, format string) error {
 				appDesc.Write(make([]byte, 20))
 
 				// min_efuse_blk_rev_full - critical for ESP32S3 compatibility
-				binary.Write(appDesc, binary.LittleEndian, uint32(0x00))
+				// Set to 0x0000 (compatible with all chip revisions)
+				binary.Write(appDesc, binary.LittleEndian, uint16(0x0000))
 
-				// max_efuse_blk_rev_full - set to 0 like ESP-IDF
-				binary.Write(appDesc, binary.LittleEndian, uint32(0x00000000))
+				// max_efuse_blk_rev_full - set to 0x0000 (no max limit)
+				binary.Write(appDesc, binary.LittleEndian, uint16(0x0000))
 
 				// Replace segment content with App Descriptor + original content
 				newData := appDesc.Bytes()
@@ -196,6 +197,14 @@ func makeESPFirmareImage(infile, outfile, format string) error {
 			min_chip_rev = 0
 		}
 
+		// Set correct entry point for ESP32-S3
+		var entry_addr uint32
+		if chip == "esp32s3" {
+			entry_addr = 0x40375320 // Force ESP32-S3 ROM bootloader expected entry point
+		} else {
+			entry_addr = uint32(inf.Entry) // Use ELF entry for other chips
+		}
+
 		binary.Write(outf, binary.LittleEndian, struct {
 			magic          uint8
 			segment_count  uint8
@@ -213,7 +222,7 @@ func makeESPFirmareImage(infile, outfile, format string) error {
 			segment_count:  byte(len(segments)),
 			spi_mode:       2,    // ESP_IMAGE_SPI_MODE_DIO
 			spi_speed_size: 0x1f, // ESP_IMAGE_SPI_SPEED_80M, ESP_IMAGE_FLASH_SIZE_2MB
-			entry_addr:     uint32(inf.Entry),
+			entry_addr:     entry_addr,
 			wp_pin:         0xEE, // disable WP pin
 			chip_id:        chip_id,
 			min_chip_rev:   min_chip_rev,

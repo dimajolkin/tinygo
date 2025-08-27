@@ -33,18 +33,38 @@ esp_app_desc:
 
 // Only calling it call_start_cpu0 for consistency with ESP-IDF.
 .section .text.call_start_cpu0
-1:
-    .long _stack_top
 .global call_start_cpu0
 call_start_cpu0:
-    // At this point:
-    // - The ROM bootloader is finished and has jumped to here.
-    // - We're running from IRAM: both IRAM and DRAM segments have been loaded
-    //   by the ROM bootloader.
-    // - We have a usable stack (but not the one we would like to use).
-    // - No flash mappings (MMU) are set up yet for ESP32S3.
-    // Note: ROM bootloader should have initialized basic flash mapping
+    // CRITICAL: Absolute minimal GPIO test without ANY literals
+    // Just try to write something that proves code execution
+    
+    // Use very small immediate values only (< 2048 to avoid literals)
+    movi a2, 1              // Test value
+    movi a3, 1              // Another test value 
+    
+    // Simple operations to prove execution - we'll use proper GPIO later
+    add a4, a2, a3          // a4 = 2
+    slli a4, a4, 1          // a4 = 4
+    
+    // SUCCESS: If we reach here without crash, bootloader transfer works!
+    // Jump to full initialization (with literals allowed)
+    j full_startup
 
+// Full startup with literals - separate section
+.section .text
+.global full_startup
+full_startup:
+    // FIRST: GPIO test - now we can use literals safely
+    movi a2, 0x60004000     // GPIO base address
+    movi a3, 0x10           // GPIO4 bit mask  
+    s32i a3, a2, 0x24       // GPIO_ENABLE_W1TS - enable GPIO4
+    s32i a3, a2, 0x8        // GPIO_OUT_W1TS - turn on GPIO4
+    
+    // Try GPIO2 as well
+    movi a3, 0x4            // GPIO2 bit mask
+    s32i a3, a2, 0x24       // Enable GPIO2
+    s32i a3, a2, 0x8        // Turn on GPIO2
+    
     // We need to set the stack pointer to a different value. This is somewhat
     // complicated in the Xtensa architecture. The code below is a modified
     // version of the following code:
@@ -66,7 +86,7 @@ call_start_cpu0:
     rsync
 
     // Load new stack pointer.
-    l32r sp, 1b
+    l32r sp, stack_ptr_addr
 
     // Re-enable WOE.
     rsr.ps a2
@@ -82,6 +102,11 @@ call_start_cpu0:
 
     // Jump to the runtime start function written in Go.
     call4 main
+
+    // Stack pointer address - must be aligned
+    .align 4
+stack_ptr_addr:
+    .long _stack_top
 
 
 

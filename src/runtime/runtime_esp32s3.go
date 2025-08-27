@@ -60,19 +60,28 @@ func main() {
 	// This is critical for ESP32S3 to see any output
 	machine.InitSerial()
 
+	// DEBUG: Add early runtime debug output
+	print("TinyGo ESP32-S3 runtime started\n")
+
 	// Initialize main system timer used for time.Now.
+	print("Initializing timer...\n")
 	initTimer()
 
+	print("Timer initialized, calling run()...\n")
 	// Initialize the heap, call main.main, etc.
 	run()
 
 	// Fallback: if main ever returns, hang the CPU.
+	print("main.main() returned, exiting...\n")
 	exit(0)
 }
 
 func abort() {
 	// lock up forever
-	print("abort called\n")
+	print("ABORT: TinyGo runtime abort() called - hanging CPU\n")
+	for {
+		// infinite loop to hang CPU
+	}
 }
 
 //go:extern _vector_table
@@ -84,16 +93,50 @@ var _sbss [0]byte
 //go:extern _ebss
 var _ebss [0]byte
 
-// ESP App Descriptor must be forcibly included to prevent dead code elimination
+// ESP App Descriptor structure matching ESP-IDF esp_app_desc_t
+// This must be placed in .rodata_desc section for bootloader compatibility
+type espAppDesc struct {
+	magic_word              uint32     // ESP_APP_DESC_MAGIC_WORD (0xABCD5432)
+	secure_version          uint32     // Secure version
+	reserv1                 [2]uint32  // reserv1
+	version                 [32]byte   // Application version
+	project_name            [32]byte   // Project name  
+	time                    [16]byte   // Compile time
+	date                    [16]byte   // Compile date
+	idf_ver                 [32]byte   // Version IDF
+	app_elf_sha256          [32]byte   // sha256 of elf file
+	min_efuse_blk_rev_full  uint16     // Minimal eFuse block revision supported by image
+	max_efuse_blk_rev_full  uint16     // Maximal eFuse block revision supported by image  
+	mmu_page_size           uint8      // MMU page size in log base 2 format
+	reserv3                 [3]uint8   // reserv3
+	reserv2                 [18]uint32 // reserv2
+}
+
+// ESP App Descriptor instance - must be in .rodata_desc section
 //
-//go:extern esp_app_desc
-var esp_app_desc [256]byte
+//go:section .rodata_desc
+var esp_app_desc = espAppDesc{
+	magic_word:              0xABCD5432, // ESP_APP_DESC_MAGIC_WORD
+	secure_version:          0,
+	reserv1:                 [2]uint32{0, 0},
+	version:                 [32]byte{'1', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+	project_name:            [32]byte{'T', 'i', 'n', 'y', 'G', 'o', ' ', 'A', 'p', 'p', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+	time:                    [16]byte{'0', '0', ':', '0', '0', ':', '0', '0', 0, 0, 0, 0, 0, 0, 0, 0},
+	date:                    [16]byte{'J', 'a', 'n', ' ', ' ', '1', ' ', '2', '0', '2', '4', 0, 0, 0, 0, 0},
+	idf_ver:                 [32]byte{'T', 'i', 'n', 'y', 'G', 'o', '-', 'C', 'o', 'm', 'p', 'a', 't', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+	app_elf_sha256:          [32]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+	min_efuse_blk_rev_full:  0x0000, // Support all ESP32S3 revisions
+	max_efuse_blk_rev_full:  0x0000, // No max limit
+	mmu_page_size:           31 - 13, // 8KB page size (1 << 13) -> log2(8192) = 13, so 31-13=18 but ESP uses different calc
+	reserv3:                 [3]uint8{0, 0, 0},
+	reserv2:                 [18]uint32{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+}
 
 // Force the app descriptor to be included by referencing it
 func init() {
 	// This ensures esp_app_desc is not eliminated by the linker
 	// We actually read from it to make it truly used
-	if esp_app_desc[0] != 0 || esp_app_desc[255] != 0 {
+	if esp_app_desc.magic_word == 0 {
 		// This will never execute but forces the linker to keep the symbol
 		abort()
 	}

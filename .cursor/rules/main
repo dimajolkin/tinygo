@@ -1,12 +1,106 @@
-Это tinygo мы пытаемся собрать приложение для поддержки esp32s3 
+- Отвечай на русском
 
-1. правь файлы в src, build не трогаем
-2. не собирай приложение сам, проси меня.
-3. ты можешь редактировать файлы на своё усмотрение, но всегда сверяйся с оф документацией по чипу.
-  https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/
-4. Можно смотреть примеры как сделано на esp32c3 если это совместимо.
-5. Сначала  пробуй простой подход, и делай экспериментальные правки, чтобы прроверить теорию, если необходимо
+## Краткая выжимка по отладке ESP32-S3 TinyGo
 
+### Проблема
+TinyGo приложение не запускается на ESP32-S3. Изначально была ошибка `Image requires efuse blk rev >= v131.36, but chip is v1.3`, которая была исправлена через корректную структуру App Descriptor.
 
-Тестовые прошивки пиши в этой директории:
+### Текущее состояние
+- ✅ **App Descriptor исправлен** - ошибка efuse больше не появляется
+- ✅ **Entry point корректный** - 0x40375330 (близко к ESP-IDF 0x40375320)
+- ❌ **Код не исполняется** - нет вывода в UART, LED не загораются
+
+### Измененные файлы
+
+#### 1. `/Users/dimajolkin/GolandProjects/tinygo/src/device/esp/esp32s3.S`
+```assembly
+call_start_cpu0:
+    // ПЕРВОЕ ДЕЙСТВИЕ: GPIO4 debug LED
+    movi a2, 0x60004000     // GPIO base
+    movi a3, 0x10           // GPIO4 bit mask
+    s32i a3, a2, 0x8        // Enable output
+    s32i a3, a2, 0x4        // Set high
+```
+
+#### 2. `/Users/dimajolkin/GolandProjects/tinygo/targets/esp32s3.ld`
+```
+MEMORY {
+    IRAM : ORIGIN = 0x40375320, LENGTH = 0x8CE0  // Точный ESP-IDF entry point
+}
+```
+
+#### 3. `/Users/dimajolkin/GolandProjects/tinygo/src/runtime/runtime_esp32s3.go`
+```go
+//go:extern esp_app_desc
+var esp_app_desc [256]byte  // Принудительное включение App Descriptor
+```
+
+### Попытки отладки GPIO
+- **GPIO2, 8, 15, 4, 20** - не загорались
+- **GPIO48, 38** (RGB LED) - не загорались  
+- **Текущий тест: GPIO4** - самая первая инициализация в entry point
+
+### Вероятная проблема
+ESP-IDF загрузчик не передаёт управление на TinyGo код, несмотря на корректный entry point. Возможные причины:
+- Неправильная структура binary image
+- Проблемы с memory mapping
+- Отсутствие критических секций/заголовков
+
+### Команды для сборки
+```bash
+cd /Users/dimajolkin/GolandProjects/tinigo-example
+/Users/dimajolkin/GolandProjects/tinygo/build/tinygo flash -target esp32s3 ./main.go
+```
+
+### Все сообщения пользователя (хронологически)
+1. `@main в примерах прошивок есть esp_native_blink/build/esp32s3_blink.elf рабочий пример от официальной esp main.elf - которую собрала tinygo (/Users/dimajolkin/GolandProjects/tinygo/build/tinygo build -o main.elf -target esp32s3 ./main.go) Сейчас продолжается проблема с App Description E (86) boot_comm: Image requires efuse blk rev >= v131.36, but chip is v1.3`
+2. `esp_native_blink/build - возможно тут а может и в ~/esp директории ты сможешь найти примеры?`
+3. `перепроверь, main.elf я пересобрал его`
+4. `ещё раз`
+5. `UART вроде работал, если судить что мы видели ошибки ранее?`
+6. `пересобрал, всё так-же в логих пусто.`
+7. `Не, тишина, попробуй просто его включить?`
+8. `на 8 нету, но на 20 что-то есть, может 15, 4 проверим? у меня esp32s3 devkit v3`
+9. `Немигают! Давай питание на все пины подадим? И перепроверим что он точно исполняется?`
+10. `незагораются, смотрим передачу управления значит`
+11. `я ещё не пересобрал`
+12. `ек спеши, давай делай следующее действие когда проверим результат!`
+13. `Светодиоды не загораются`
+14. `Посмотри в исходниках или в доке, что ожидает загрузчик и в каком месте? Чтобы не гадать?)`
+15. `создал app.bin`
+16. `flash_2.sh прошивает, но светодиоды не запускаются`
+17. `давай в асемблере в начале инициализируй GPIO4 и подай питание на него`
+
+### Исследованные директории и файлы
+#### Основные файлы проекта:
+- `/Users/dimajolkin/GolandProjects/tinygo/src/device/esp/esp32s3.S` - assembly startup код
+- `/Users/dimajolkin/GolandProjects/tinygo/targets/esp32s3.ld` - linker script
+- `/Users/dimajolkin/GolandProjects/tinygo/targets/esp32s3.json` - target config
+- `/Users/dimajolkin/GolandProjects/tinygo/src/runtime/runtime_esp32s3.go` - runtime
+- `/Users/dimajolkin/GolandProjects/tinygo/builder/esp.go` - ESP binary builder
+
+#### ESP-IDF референсы:
+- `~/esp/esp-idf/components/esp_app_format/include/esp_app_desc.h` - структура App Descriptor
+- `~/esp/esp-idf/components/esp_app_format/esp_app_desc.c` - реализация App Descriptor
+- `~/esp/esp-idf/examples/get-started/blink/build/esp-idf/esp_system/ld/sections.ld` - ESP-IDF linker script
+- `~/esp/esp-idf/docs/zh_CN/api-guides/startup.rst` - документация startup процесса
+- `~/esp/esp-idf/components/bootloader_support/src/bootloader_utility.c` - bootloader код
+
+#### Рабочий пример:
+- `/Users/dimajolkin/GolandProjects/tinigo-example/esp_native_blink/build/esp32s3_blink.elf` - рабочий ESP-IDF пример
+- `/Users/dimajolkin/GolandProjects/tinigo-example/esp_native_blink/build/esp32s3_blink.bin` - рабочий binary
+
+#### Сгенерированные файлы:
+- `/Users/dimajolkin/GolandProjects/tinigo-example/main.elf` - TinyGo ELF 
+- `/Users/dimajolkin/GolandProjects/tinigo-example/app.bin` - TinyGo binary
+
+### Детали железа пользователя
+- **Плата**: ESP32-S3 DevKit v3
+- **Тестируемые GPIO**: 2, 4, 8, 15, 20, 38, 48
+- **Результат**: ни один LED не загорается
+- **UART**: работал (видели ошибки ранее), но сейчас тишина
+
+### Следующие шаги
+Нужно сравнить structure ESP binary image между TinyGo и ESP-IDF, особенно в `builder/esp.go` где происходит конвертация ELF → BIN.
+
 /Users/dimajolkin/GolandProjects/tinigo-example
