@@ -5,11 +5,11 @@ MEMORY
 {
     /* Note: DRAM and IRAM below are actually in the same 416K address space. */
     DRAM (rw) : ORIGIN = 0x3FC88000, LENGTH = 416K /* Internal SRAM 1 (data bus) */
-    IRAM (x)  : ORIGIN = 0x40375320, LENGTH = 416K /* Internal SRAM 1 (instruction bus) - EXACT ESP-IDF entry point */
+    IRAM (x)  : ORIGIN = 0x40378000, LENGTH = 416K /* Internal SRAM 1 (instruction bus) */
 
     /* Note: DROM and IROM below are actually in the same 32M address space. */
-    DROM (r)  : ORIGIN = 0x3C000000, LENGTH = 32M /* Data bus (read-only) - Flash */
-    IROM (rx) : ORIGIN = 0x42000000, LENGTH = 32M /* Instruction bus - Flash */
+    DROM (r)  : ORIGIN = 0x3C000000, LENGTH = 32M /* Data bus (read-only) */
+    IROM (rx) : ORIGIN = 0x42000000, LENGTH = 32M /* Instruction bus */
 }
 
 /* The entry point. It is set in the image flashed to the chip, so must be
@@ -19,38 +19,16 @@ ENTRY(call_start_cpu0)
 
 SECTIONS
 {
-    /* Dummy section to make sure the .rodata section starts exactly behind the
-     * image header.
+    /* Constant literals and code. Loaded into IRAM for now. Eventually, most
+     * code should be executed directly from flash.
+     * Note that literals must be before code for the l32r instruction to work.
      */
-    .rodata_dummy (NOLOAD): ALIGN(4)
-    {
-        . += 0x18; /* image header at start of flash: esp_image_header_t */
-        . += 0x8;  /* DROM segment header (8 bytes) */
-    } > DROM
-
-    /* Constant global variables, stored in DROM (Flash).
-     * ESP App Descriptor must be placed first for ESP32-S3 bootloader compatibility.
-     */
-    .rodata : ALIGN(4)
-    {
-        *(.rodata_desc)  /* ESP App descriptor - MUST be first */
-        *(.rodata*)
-        . = ALIGN (4);
-    } >DROM
-
-    /* Entry point MUST be exactly at 0x40375320 */
-    .entry 0x40375320 : ALIGN(4)
-    {
-        *(.text.call_start_cpu0)
-    } >IRAM
-    
-    /* Literals and rest of code */
     .text : ALIGN(4)
     {
-        *(.literal.call_start_cpu0)
+        *(.literal.text.call_start_cpu0)
+        *(.text.call_start_cpu0)
         *(.literal .text)
         *(.literal.* .text.*)
-        *(.text.*)
     } >IRAM
 
     /* Put the stack at the bottom of DRAM, so that the application will
@@ -61,6 +39,17 @@ SECTIONS
         . = ALIGN(16);
         . += _stack_size;
         _stack_top = .;
+    } >DRAM
+
+    /* Constant global variables.
+     * They are loaded in DRAM for ease of use. Eventually they should be stored
+     * in flash and loaded directly from there but they're kept in RAM to make
+     * sure they can always be accessed (even in interrupts).
+     */
+    .rodata : ALIGN(4)
+    {
+        *(.rodata)
+        *(.rodata.*)
     } >DRAM
 
     /* Mutable global variables.

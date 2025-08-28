@@ -65,81 +65,6 @@ func makeESPFirmareImage(infile, outfile, format string) error {
 	// Sort the segments by address. This is what esptool does too.
 	sort.SliceStable(segments, func(i, j int) bool { return segments[i].addr < segments[j].addr })
 
-	// Enable ESP App Descriptor for ESP32S3 bootloader compatibility
-	// Modify segments for ESP32S3 to include ESP App Descriptor BEFORE checksum calculation
-	// ONLY for esp32s3 binary format, NOT for regular esp32 format used by esptool elf2image
-	if format == "esp32s3" {
-		// Find .rodata segment and replace its content with ESP App Descriptor
-		for i, segment := range segments {
-			if segment.addr == 0x3c000020 { // This is .rodata segment
-				// Create ESP App Descriptor
-				appDesc := &bytes.Buffer{}
-
-				// Write ESP App Descriptor structure (esp_app_desc_t)
-				// Magic word: 0xABCD5432
-				binary.Write(appDesc, binary.LittleEndian, uint32(0xABCD5432))
-				// secure_version
-				binary.Write(appDesc, binary.LittleEndian, uint32(0))
-				// reserv1[2]
-				binary.Write(appDesc, binary.LittleEndian, [2]uint32{0, 0})
-
-				// version[32] - app version string
-				version := make([]byte, 32)
-				copy(version, "1")
-				appDesc.Write(version)
-
-				// project_name[32] - project name
-				projectName := make([]byte, 32)
-				copy(projectName, "TinyGo App")
-				appDesc.Write(projectName)
-
-				// time[16] - compile time
-				timeStr := make([]byte, 16)
-				copy(timeStr, "00:00:00")
-				appDesc.Write(timeStr)
-
-				// date[16] - compile date
-				dateStr := make([]byte, 16)
-				copy(dateStr, "Jan  1 2024")
-				appDesc.Write(dateStr)
-
-				// idf_ver[32] - IDF version
-				idfVer := make([]byte, 32)
-				copy(idfVer, "TinyGo-Compat")
-				appDesc.Write(idfVer)
-
-				// app_elf_sha256[32] - SHA256 of app ELF
-				appDesc.Write(make([]byte, 32))
-
-				// reserv2[20] - reserved fields
-				appDesc.Write(make([]byte, 20))
-
-				// min_efuse_blk_rev_full - critical for ESP32S3 compatibility
-				// Set to 0x0000 (compatible with all chip revisions)
-				binary.Write(appDesc, binary.LittleEndian, uint16(0x0000))
-
-				// max_efuse_blk_rev_full - set to 0x0000 (no max limit)
-				binary.Write(appDesc, binary.LittleEndian, uint16(0x0000))
-
-				// Replace segment content with App Descriptor + original content
-				newData := appDesc.Bytes()
-
-				// If original segment is larger, append remaining original content
-				if len(segment.data) > len(newData) {
-					newData = append(newData, segment.data[len(newData):]...)
-				}
-
-				// Align to 4 bytes
-				for len(newData)%4 != 0 {
-					newData = append(newData, 0)
-				}
-
-				segments[i].data = newData
-				break
-			}
-		}
-	}
-
 	// Calculate checksum over the segment data. This is used in the image
 	// footer.
 	checksum := uint8(0xef)
@@ -186,25 +111,6 @@ func makeESPFirmareImage(infile, outfile, format string) error {
 		// Note: not adding a SHA256 hash as the binary is modified by
 		// esptool.py while flashing and therefore the hash won't be valid
 		// anymore.
-		// Set appropriate min_chip_rev based on chip type
-		var min_chip_rev uint8
-		switch chip {
-		case "esp32s3":
-			min_chip_rev = 0 // Use 0 for compatibility with all ESP32S3 revisions
-		case "esp32", "esp32c3":
-			min_chip_rev = 0
-		default:
-			min_chip_rev = 0
-		}
-
-		// Set correct entry point for ESP32-S3
-		var entry_addr uint32
-		if chip == "esp32s3" {
-			entry_addr = 0x40375320 // Force ESP32-S3 ROM bootloader expected entry point
-		} else {
-			entry_addr = uint32(inf.Entry) // Use ELF entry for other chips
-		}
-
 		binary.Write(outf, binary.LittleEndian, struct {
 			magic          uint8
 			segment_count  uint8
@@ -222,12 +128,10 @@ func makeESPFirmareImage(infile, outfile, format string) error {
 			segment_count:  byte(len(segments)),
 			spi_mode:       2,    // ESP_IMAGE_SPI_MODE_DIO
 			spi_speed_size: 0x1f, // ESP_IMAGE_SPI_SPEED_80M, ESP_IMAGE_FLASH_SIZE_2MB
-			entry_addr:     entry_addr,
+			entry_addr:     uint32(inf.Entry),
 			wp_pin:         0xEE, // disable WP pin
 			chip_id:        chip_id,
-			min_chip_rev:   min_chip_rev,
-			reserved:       [8]uint8{0, 0, 0, 0, 0, 0, 0, 0}, // explicitly zero reserved field
-			hash_appended:  true,                             // add a SHA256 hash
+			hash_appended:  true, // add a SHA256 hash
 		})
 	case "esp8266":
 		// Header format:

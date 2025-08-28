@@ -15,10 +15,7 @@
 		"src/internal/task/task_stack_esp32.S"
 	],
 	"binary-format": "esp32s3",
-	"flash-method": "command",  
-	"flash-command": "esptool.py --chip=esp32s3 --port {port} --baud 921600 write-flash -z 0x0 targets/esp32s3-bootloader.bin 0x8000 targets/esp32s3-partition-table.bin 0x10000 {bin}",
-	"flash-1200-bps-reset": "true",
-
+	"flash-command": "esptool.py --chip=esp32s3 --port {port} write_flash 0x0000 {bin} -ff 80m -fm dout",
 	"emulator": "qemu-system-xtensa -machine esp32 -nographic -drive file={img},if=mtd,format=raw",
 	"gdb": ["xtensa-esp32-elf-gdb"]
 }

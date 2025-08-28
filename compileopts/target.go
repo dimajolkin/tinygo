@@ -49,7 +49,6 @@ type TargetSpec struct {
 	BootPatches      []string `json:"boot-patches,omitempty"`      // Bootloader patches to be applied in the order they appear.
 	Emulator         string   `json:"emulator,omitempty"`
 	FlashCommand     string   `json:"flash-command,omitempty"`
-	EraseBeforeFlash *bool    `json:"erase-before-flash,omitempty"`
 	GDB              []string `json:"gdb,omitempty"`
 	PortReset        string   `json:"flash-1200-bps-reset,omitempty"`
 	SerialPort       []string `json:"serial-port,omitempty"` // serial port IDs in the form "vid:pid"
