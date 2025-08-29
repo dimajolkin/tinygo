@@ -6,10 +6,19 @@
 	"scheduler": "tasks",
 	"serial": "uart",
 	"linker": "ld.lld",
-	"default-stack-size": 2048,
+	"default-stack-size": 8192,
 	"rtlib": "compiler-rt",
 	"libc": "picolibc",
 	"linkerscript": "targets/esp32s3.ld",
+	"cflags": [
+		"-O2",
+		"-fno-builtin-memset",
+		"-fno-builtin-memcpy",
+		"-fno-builtin-memmove"
+	],
+	"ldflags": [
+		"-O2"
+	],
 	"extra-files": [
 		"src/device/esp/esp32s3.S",
 		"src/internal/task/task_stack_esp32.S"

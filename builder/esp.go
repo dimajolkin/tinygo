@@ -62,18 +62,6 @@ func makeESPFirmareImage(infile, outfile, format string) error {
 		})
 	}
 
-	// Separate esp32 and esp32-img. The -img suffix indicates we should make an
-	// image, not just a binary to be flashed at 0x1000 for example.
-	chip := format
-	makeImage := false
-	if strings.HasSuffix(format, "-img") {
-		makeImage = true
-		chip = format[:len(format)-len("-img")]
-	}
-
-	// Note: App Descriptor is now handled by esptool.py elf2image command
-	// No need to manually add it here
-
 	// Sort the segments by address. This is what esptool does too.
 	sort.SliceStable(segments, func(i, j int) bool { return segments[i].addr < segments[j].addr })
 
@@ -90,6 +78,15 @@ func makeESPFirmareImage(infile, outfile, format string) error {
 	// calculate a hash over the entire image.
 	// An added benefit is that we don't need to check for errors all the time.
 	outf := &bytes.Buffer{}
+
+	// Separate esp32 and esp32-img. The -img suffix indicates we should make an
+	// image, not just a binary to be flashed at 0x1000 for example.
+	chip := format
+	makeImage := false
+	if strings.HasSuffix(format, "-img") {
+		makeImage = true
+		chip = format[:len(format)-len("-img")]
+	}
 
 	if makeImage {
 		// The bootloader starts at 0x1000, or 4096.
