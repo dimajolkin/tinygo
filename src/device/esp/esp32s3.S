@@ -17,7 +17,7 @@ call_start_cpu0:
     // Debug: Light up GPIO4 immediately to signal entry point reached
     // ESP32-S3 GPIO base address is different from ESP32
     movi a2, 0x60004000     // GPIO base address for ESP32-S3
-    movi a3, 0x10           // GPIO4 bit mask (1 << 4)
+    movi a3, 0x20           // GPIO4 bit mask (1 << 4)
     s32i a3, a2, 0x24       // GPIO_ENABLE_REG offset 0x24: enable GPIO4 output
     s32i a3, a2, 0x8        // GPIO_OUT_W1TS_REG offset 0x8: set GPIO4 high
     

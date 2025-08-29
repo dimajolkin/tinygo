@@ -71,31 +71,8 @@ func makeESPFirmareImage(infile, outfile, format string) error {
 		chip = format[:len(format)-len("-img")]
 	}
 
-	// Add ESP App Descriptor for ESP32 family chips (required by bootloader)
-	if chip == "esp32" || chip == "esp32c3" || chip == "esp32s3" {
-		appDesc := createESPAppDescriptor(chip)
-		// Find rodata segment or create one
-		roDataFound := false
-		for _, segment := range segments {
-			// Look for DRAM segment that could hold rodata
-			if segment.addr >= 0x3FC88000 && segment.addr < 0x3FD00000 {
-				// Prepend app descriptor to DRAM segment
-				newData := make([]byte, len(appDesc)+len(segment.data))
-				copy(newData, appDesc)
-				copy(newData[len(appDesc):], segment.data)
-				segment.data = newData
-				roDataFound = true
-				break
-			}
-		}
-		if !roDataFound {
-			// Create new DRAM segment for app descriptor
-			segments = append([]*espImageSegment{{
-				addr: 0x3FC89000, // DRAM address
-				data: appDesc,
-			}}, segments...)
-		}
-	}
+	// Note: App Descriptor is now handled by esptool.py elf2image command
+	// No need to manually add it here
 
 	// Sort the segments by address. This is what esptool does too.
 	sort.SliceStable(segments, func(i, j int) bool { return segments[i].addr < segments[j].addr })
@@ -217,52 +194,4 @@ func makeESPFirmareImage(infile, outfile, format string) error {
 
 	// Write the image to the output file.
 	return os.WriteFile(outfile, outf.Bytes(), 0666)
-}
-
-// createESPAppDescriptor creates the ESP app descriptor structure required by the bootloader
-func createESPAppDescriptor(chip string) []byte {
-	// ESP app descriptor structure (256 bytes total)
-	appDesc := make([]byte, 256)
-	
-	// Magic word: 0xABCD5432 (little endian)
-	appDesc[0] = 0x32
-	appDesc[1] = 0x54
-	appDesc[2] = 0xCD
-	appDesc[3] = 0xAB
-	
-	// Secure version (4 bytes): 0x00000000
-	// Reserved fields (8 bytes): all zeros
-	
-	// Min efuse block revision (4 bytes): 0x00000000 - compatible with all chips
-	appDesc[16] = 0x00
-	appDesc[17] = 0x00
-	appDesc[18] = 0x00
-	appDesc[19] = 0x00
-	
-	// Max efuse block revision (4 bytes): 0xFFFFFFFF - no maximum limit
-	appDesc[20] = 0xFF
-	appDesc[21] = 0xFF
-	appDesc[22] = 0xFF
-	appDesc[23] = 0xFF
-	
-	// Project name (32 bytes)
-	projectName := "TinyGo ESP32-S3"
-	copy(appDesc[24:56], []byte(projectName))
-	
-	// Build time (16 bytes)
-	buildTime := "00:00:00"
-	copy(appDesc[56:72], []byte(buildTime))
-	
-	// Build date (16 bytes)
-	buildDate := "Jan  1 2024"
-	copy(appDesc[72:88], []byte(buildDate))
-	
-	// IDF version (32 bytes)
-	idfVersion := "v5.0.0-tinygo"
-	copy(appDesc[88:120], []byte(idfVersion))
-	
-	// SHA256 hash of ELF file (32 bytes) - leave as zeros for now
-	// Reserved fields (88 bytes) - all zeros
-	
-	return appDesc
 }
