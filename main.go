@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"runtime/pprof"
 	"sort"
 	"strconv"
@@ -2042,7 +2043,26 @@ func main() {
 		if s, err := goenv.GorootVersionString(); err == nil {
 			goversion = s
 		}
-		fmt.Printf("tinygo version %s %s/%s (using go version %s and LLVM version %s)\n", goenv.Version(), runtime.GOOS, runtime.GOARCH, goversion, llvm.Version)
+		llvmVariant := "standard"
+		// Check if this is ESP LLVM build by looking at executable name or Xtensa support
+		if strings.Contains(os.Args[0], "tinygo-esp") {
+			llvmVariant = "ESP"
+		} else {
+			// Additional check: see if LLVM supports Xtensa (ESP-specific)
+			// This is a more reliable indicator than just the executable name
+			if strings.Contains(llvm.Version, "19.1.2") {
+				// Try to detect ESP LLVM by checking build info
+				if info, ok := debug.ReadBuildInfo(); ok {
+					for _, setting := range info.Settings {
+						if setting.Key == "CGO_LDFLAGS" && strings.Contains(setting.Value, "XtensaCodeGen") {
+							llvmVariant = "ESP"
+							break
+						}
+					}
+				}
+			}
+		}
+		fmt.Printf("tinygo version %s %s/%s (using go version %s and LLVM version %s %s)\n", goenv.Version(), runtime.GOOS, runtime.GOARCH, goversion, llvm.Version, llvmVariant)
 	case "env":
 		if flag.NArg() == 0 {
 			// Show all environment variables.

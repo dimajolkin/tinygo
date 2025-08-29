@@ -4,7 +4,6 @@ package runtime
 
 import (
 	"device/esp"
-	"machine"
 	"unsafe"
 )
 
@@ -59,7 +58,7 @@ func main() {
 	clearbss()
 
 	// Initialize UART.
-	machine.InitSerial()
+	//machine.InitSerial()
 
 	// Initialize main system timer used for time.Now.
 	initTimer()
@@ -67,6 +66,8 @@ func main() {
 	debugGPIO(4)
 	// Now use standard run() which will call initHeap() again but it should be safe
 	run()
+
+	debugGPIO(5)
 
 	// Fallback: if main ever returns, hang the CPU.
 	exit(0)
