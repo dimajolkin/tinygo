@@ -35,10 +35,10 @@ func (i2c *I2C) Configure(config I2CConfig) error {
 		config.Frequency = 400 * KHz
 	}
 	if config.SCL == 0 {
-		config.SCL = SCL_PIN
+		//config.SCL = SCL_PIN
 	}
 	if config.SDA == 0 {
-		config.SDA = SDA_PIN
+		//config.SDA = SDA_PIN
 	}
 
 	i2c.initClock(config)

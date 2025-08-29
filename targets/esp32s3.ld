@@ -5,7 +5,7 @@ MEMORY
 {
     /* Note: DRAM and IRAM below are actually in the same 416K address space. */
     DRAM (rw) : ORIGIN = 0x3FC88000, LENGTH = 416K /* Internal SRAM 1 (data bus) */
-    IRAM (x)  : ORIGIN = 0x40378000, LENGTH = 416K /* Internal SRAM 1 (instruction bus) */
+    IRAM (x)  : ORIGIN = 0x40374000, LENGTH = 400K /* Internal SRAM 1 (correct for ESP32-S3) */
 
     /* Note: DROM and IROM below are actually in the same 32M address space. */
     DROM (r)  : ORIGIN = 0x3C000000, LENGTH = 32M /* Data bus (read-only) */
@@ -25,7 +25,7 @@ SECTIONS
      */
     .text : ALIGN(4)
     {
-        *(.literal.text.call_start_cpu0)
+        *(.literal.call_start_cpu0)
         *(.text.call_start_cpu0)
         *(.literal .text)
         *(.literal.* .text.*)
