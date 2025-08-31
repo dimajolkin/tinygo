@@ -188,7 +188,21 @@ func (uart *UART) Configure(config UARTConfig) {
 	if config.BaudRate == 0 {
 		config.BaudRate = 115200
 	}
+
+	// Configure UART with basic settings
 	uart.Bus.CLKDIV.Set(peripheralClock / config.BaudRate)
+
+	// Configure UART pins for ESP32-S3
+	// Most ESP32-S3 dev boards use GPIO43 (TX) and GPIO44 (RX) for UART0
+	if uart.Bus == esp.UART0 {
+		// Configure TX pin (GPIO43)
+		GPIO43.Configure(PinConfig{Mode: PinOutput})
+		GPIO43.outFunc().Set(1) // UART0 TX signal
+
+		// Configure RX pin (GPIO44)
+		GPIO44.Configure(PinConfig{Mode: PinInput})
+		inFunc(1).Set(esp.GPIO_FUNC_IN_SEL_CFG_SEL | uint32(GPIO44)) // UART0 RX signal
+	}
 }
 
 func (uart *UART) writeByte(b byte) error {
@@ -202,5 +216,105 @@ func (uart *UART) writeByte(b byte) error {
 }
 
 func (uart *UART) flush() {}
+
+// USB Serial/JTAG Controller for ESP32-S3
+// Similar to ESP32-C3 implementation
+type USB_DEVICE struct {
+	Bus *esp.USB_DEVICE_Type
+}
+
+var (
+	_USBCDC = USB_DEVICE{
+		Bus: esp.USB_DEVICE,
+	}
+
+	USBCDC Serialer = _USBCDC
+)
+
+type Serialer interface {
+	WriteByte(c byte) error
+	Write(data []byte) (n int, err error)
+	Configure(config UARTConfig) error
+	Buffered() int
+	ReadByte() (byte, error)
+	DTR() bool
+	RTS() bool
+}
+
+func (usbdev USB_DEVICE) Configure(config UARTConfig) error {
+	// Enable USB Serial/JTAG controller according to ESP-IDF documentation
+
+	// 1. Enable USB device clock
+	esp.SYSTEM.PERIP_CLK_EN1.SetBits(esp.SYSTEM_PERIP_CLK_EN1_USB_DEVICE_CLK_EN)
+
+	// 2. Release USB device reset
+	esp.SYSTEM.PERIP_RST_EN1.ClearBits(esp.SYSTEM_PERIP_RST_EN1_USB_DEVICE_RST)
+
+	// 3. Enable USB pad to use GPIO19/20 for USB Serial/JTAG
+	usbdev.Bus.SetCONF0_USB_PAD_ENABLE(1)
+
+	// 4. Enable USB JTAG bridge for serial communication
+	usbdev.Bus.SetCONF0_USB_JTAG_BRIDGE_EN(1)
+
+	// 5. Initialize endpoint 1 for serial communication
+	// Clear any pending data
+	usbdev.Bus.EP1_CONF.ClearBits(0xFF)
+
+	// 6. Enable serial input endpoint
+	usbdev.Bus.SetEP1_CONF_SERIAL_IN_EP_DATA_FREE(1)
+
+	return nil
+}
+
+func (usbdev USB_DEVICE) WriteByte(c byte) error {
+	// Check if USB Serial/JTAG is connected and ready
+	// Simple approach: just try to write without complex checks
+
+	// Write byte to USB Serial/JTAG TX FIFO
+	usbdev.Bus.SetEP1_RDWR_BYTE(uint32(c))
+
+	// Signal that data is ready to be sent
+	usbdev.Bus.SetEP1_CONF_WR_DONE(1)
+
+	// Small delay to allow USB processing
+	for i := 0; i < 10; i++ {
+		// Simple delay loop
+	}
+
+	return nil
+}
+
+func (usbdev USB_DEVICE) Write(data []byte) (n int, err error) {
+	for _, c := range data {
+		err = usbdev.WriteByte(c)
+		if err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
+func (usbdev USB_DEVICE) ReadByte() (byte, error) {
+	// Not implemented for ESP32-S3 yet
+	return 0, errors.New("ReadByte not implemented")
+}
+
+func (usbdev USB_DEVICE) Buffered() int {
+	return int(usbdev.Bus.GetEP1_CONF_SERIAL_OUT_EP_DATA_AVAIL())
+}
+
+func (usbdev USB_DEVICE) DTR() bool {
+	return false
+}
+
+func (usbdev USB_DEVICE) RTS() bool {
+	return false
+}
+
+func (usbdev USB_DEVICE) flush() {
+	// Simplified flush - just trigger write done
+	usbdev.Bus.SetEP1_CONF_WR_DONE(1)
+}
 
 // TODO: SPI

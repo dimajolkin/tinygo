@@ -4,6 +4,7 @@ package runtime
 
 import (
 	"device/esp"
+	"machine"
 	"unsafe"
 )
 
@@ -14,6 +15,16 @@ import (
 func debugGPIO(n int) {
 	*(*uint32)(unsafe.Pointer(uintptr(0x60004024))) |= (1 << n) // GPIO_ENABLE_REG: enable GPIO4 output
 	*(*uint32)(unsafe.Pointer(uintptr(0x60004008))) = (1 << n)  // GPIO_OUT_W1TS_REG: set GPIO4 high
+}
+
+var timeout = 50000000
+
+func waitForUSBReady() {
+	for timeout > 0 {
+		for i := 0; i < 100000; i++ {
+		}
+		timeout--
+	}
 }
 
 // This is the function called on startup after the flash (IROM/DROM) is
@@ -57,13 +68,49 @@ func main() {
 
 	clearbss()
 
-	// Initialize UART.
-	//machine.InitSerial()
-
-	// Initialize main system timer used for time.Now.
 	initTimer()
 
+	machine.USBCDC.Configure(machine.UARTConfig{BaudRate: 115200})
+	machine.InitSerial()
+
+	// Простое ожидание инициализации USB Serial/JTAG для ESP32-S3
+	waitForUSBReady()
 	debugGPIO(4)
+
+	println(1)
+	println(2)
+	println(3)
+	// Add debug info before run()
+	print("ESP32-S3 Debug: About to call run()\n")
+	print("heapStart: ")
+	printptr(heapStart)
+	print("\n")
+	print("heapEnd: ")
+	printptr(heapEnd)
+	print("\n")
+	print("heap size: ")
+	printint32(int32(heapEnd - heapStart))
+	print(" bytes\n")
+
+	// Check if heapStart and heapEnd are in valid DRAM range
+	dramStart := uintptr(0x3FC88000)
+	dramEnd := uintptr(0x3FCF0000) // 0x3FC88000 + 416K
+	if heapStart < dramStart || heapStart >= dramEnd {
+		print("ERROR: heapStart ")
+		printptr(heapStart)
+		print(" is outside DRAM range!\n")
+	}
+	if heapEnd < dramStart || heapEnd > dramEnd {
+		print("ERROR: heapEnd ")
+		printptr(heapEnd)
+		print(" is outside DRAM range!\n")
+	}
+	print("DRAM range: ")
+	printptr(dramStart)
+	print(" - ")
+	printptr(dramEnd)
+	print("\n")
+
 	// Now use standard run() which will call initHeap() again but it should be safe
 	run()
 
