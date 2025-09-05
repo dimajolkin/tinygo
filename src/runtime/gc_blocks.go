@@ -36,7 +36,7 @@ import (
 	"unsafe"
 )
 
-const gcDebug = true
+const gcDebug = false
 const needsStaticHeap = true
 
 // Some globals + constants for the entire GC.

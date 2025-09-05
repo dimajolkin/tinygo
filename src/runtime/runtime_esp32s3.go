@@ -78,15 +78,8 @@ func main() {
 
 	initTimer()
 
-	for i := 0; i < 10000; i++ {
-		print(".")
-	}
-	print("\n")
-
 	// Now use standard run() which will call initHeap() again but it should be safe
 	run()
-
-	debugGPIO(5)
 
 	// Fallback: if main ever returns, hang the CPU.
 	exit(0)
