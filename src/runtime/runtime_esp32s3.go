@@ -2,14 +2,16 @@
 
 // ESP32-S3 runtime implementation
 //
-// Memory layout (416KB DRAM total):
-// - Stack: 8KB (bottom of DRAM)
-// - .data/.bss: ~8KB (global variables)
-// - Heap: 64KB (GC managed, limited to avoid metadata overhead)
-// - Free: ~336KB (available for other uses)
+// Memory layout (416KB DRAM total at 0x3FC88000-0x3FCF0000):
+// - Stack: 8KB (grows from top of DRAM)
+// - .data/.bss: ~8KB (global variables, placed after stack)
+// - Heap: 64KB (GC managed, limited to avoid excessive metadata overhead)
+// - Free: ~336KB (available for dynamic allocation/other uses)
 //
-// Note: ROM memset functions disabled due to compatibility issues,
-// using compiler-generated implementations instead.
+// Hardware notes:
+// - ROM functions (memset/memcpy) disabled due to alignment requirements
+// - Uses compiler-generated memory functions instead
+// - USB Serial/JTAG provides debug output without external UART
 
 package runtime
 
@@ -84,7 +86,7 @@ func main() {
 	// Now use standard run() which will call initHeap() again but it should be safe
 	run()
 
-	//debugGPIO(5)
+	debugGPIO(5)
 
 	// Fallback: if main ever returns, hang the CPU.
 	exit(0)
