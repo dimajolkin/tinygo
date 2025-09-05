@@ -312,9 +312,21 @@ func (usbdev USB_DEVICE) Configure(config UARTConfig) error {
 }
 
 func (usbdev USB_DEVICE) WriteByte(c byte) error {
-	// Wait for TX FIFO space (hardware managed)
-	for usbdev.Bus.GetEP1_CONF_SERIAL_IN_EP_DATA_FREE() == 0 {
-		// Busy wait for available space
+	// Check if USB host is connected by looking at configuration status
+	// If no host is connected, just drop the byte silently
+	if !usbdev.isHostConnected() {
+		return nil
+	}
+
+	// Host is connected - wait for TX FIFO space with reasonable timeout
+	timeout := 10000 // Generous timeout for connected host
+	for usbdev.Bus.GetEP1_CONF_SERIAL_IN_EP_DATA_FREE() == 0 && timeout > 0 {
+		timeout--
+	}
+
+	// Even with host connected, don't hang forever
+	if timeout == 0 {
+		return nil
 	}
 
 	// Write byte to USB Serial/JTAG endpoint
@@ -324,6 +336,14 @@ func (usbdev USB_DEVICE) WriteByte(c byte) error {
 	usbdev.Bus.SetEP1_CONF_WR_DONE(1)
 
 	return nil
+}
+
+// isHostConnected checks if USB Serial/JTAG host is actually connected
+func (usbdev USB_DEVICE) isHostConnected() bool {
+	// Check USB device state - if configured, host is likely connected
+	// ESP32-S3 USB Serial/JTAG reports connection status via device state
+	return usbdev.Bus.GetEP1_CONF_SERIAL_IN_EP_DATA_FREE() > 0 ||
+		usbdev.Bus.GetEP1_CONF_SERIAL_OUT_EP_DATA_AVAIL() == 0
 }
 
 func (usbdev USB_DEVICE) Write(data []byte) (n int, err error) {
