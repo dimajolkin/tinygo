@@ -242,44 +242,22 @@ type Serialer interface {
 }
 
 func (usbdev USB_DEVICE) Configure(config UARTConfig) error {
-	// Enable USB Serial/JTAG controller according to ESP-IDF documentation
-
-	// 1. Enable USB device clock
-	esp.SYSTEM.PERIP_CLK_EN1.SetBits(esp.SYSTEM_PERIP_CLK_EN1_USB_DEVICE_CLK_EN)
-
-	// 2. Release USB device reset
-	esp.SYSTEM.PERIP_RST_EN1.ClearBits(esp.SYSTEM_PERIP_RST_EN1_USB_DEVICE_RST)
-
-	// 3. Enable USB pad to use GPIO19/20 for USB Serial/JTAG
-	usbdev.Bus.SetCONF0_USB_PAD_ENABLE(1)
-
-	// 4. Enable USB JTAG bridge for serial communication
-	usbdev.Bus.SetCONF0_USB_JTAG_BRIDGE_EN(1)
-
-	// 5. Initialize endpoint 1 for serial communication
-	// Clear any pending data
-	usbdev.Bus.EP1_CONF.ClearBits(0xFF)
-
-	// 6. Enable serial input endpoint
-	usbdev.Bus.SetEP1_CONF_SERIAL_IN_EP_DATA_FREE(1)
-
+	// USB Serial/JTAG configuration is handled in runtime initialization
+	// Just return nil here as the hardware is already configured
 	return nil
 }
 
 func (usbdev USB_DEVICE) WriteByte(c byte) error {
-	// Check if USB Serial/JTAG is connected and ready
-	// Simple approach: just try to write without complex checks
+	// Wait for TX FIFO to have space
+	for usbdev.Bus.GetEP1_CONF_SERIAL_IN_EP_DATA_FREE() == 0 {
+		// Wait for space in TX FIFO
+	}
 
 	// Write byte to USB Serial/JTAG TX FIFO
 	usbdev.Bus.SetEP1_RDWR_BYTE(uint32(c))
 
 	// Signal that data is ready to be sent
 	usbdev.Bus.SetEP1_CONF_WR_DONE(1)
-
-	// Small delay to allow USB processing
-	for i := 0; i < 10; i++ {
-		// Simple delay loop
-	}
 
 	return nil
 }

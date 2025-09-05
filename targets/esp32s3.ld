@@ -84,21 +84,25 @@ SECTIONS
 }
 
 /* For the garbage collector.
+ * Limit heap size to avoid excessive metadata overhead.
+ * Reserve 64KB for heap - this should be enough for most applications
+ * while keeping metadata size reasonable.
  */
 _globals_start = _sdata;
 _globals_end = _ebss;
 _heap_start = _ebss;
-_heap_end = ORIGIN(DRAM) + LENGTH(DRAM);
+_heap_end = _ebss + 64K;
 
 _stack_size = 8K;
 
 /* From ESP-IDF:
  * components/esp_rom/esp32s3/ld/esp32s3.rom.newlib-funcs.ld
  * Basic memory functions for ESP32-S3
+ * Temporarily disable ROM functions due to memset hanging issue
  */
-memset = 0x40000354;
-memcpy = 0x40000358;
-memmove = 0x4000035c;
+/* memset = 0x40000354; */
+/* memcpy = 0x40000358; */
+/* memmove = 0x4000035c; */
 
 /* From ESP-IDF:
  * components/esp_rom/esp32s3/ld/esp32s3.rom.libgcc.ld

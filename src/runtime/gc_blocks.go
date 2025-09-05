@@ -36,7 +36,7 @@ import (
 	"unsafe"
 )
 
-const gcDebug = false
+const gcDebug = true
 const needsStaticHeap = true
 
 // Some globals + constants for the entire GC.
@@ -234,40 +234,11 @@ func isOnHeap(ptr uintptr) bool {
 // any packages the runtime depends upon may not allocate memory during package
 // initialization.
 func initHeap() {
-	print("GC initHeap: Starting initialization\n")
-	print("heapStart: ")
-	printptr(heapStart)
-	print("\n")
-	print("heapEnd: ")
-	printptr(heapEnd)
-	print("\n")
-
 	calculateHeapAddresses()
 
 	// Set all block states to 'free'.
 	metadataSize := heapEnd - uintptr(metadataStart)
-	print("metadataStart: ")
-	printptr(uintptr(metadataStart))
-	print("\n")
-	print("metadataSize: ")
-	printint32(int32(metadataSize))
-	print(" bytes\n")
-
-	// Validate metadata address is in DRAM
-	dramStart := uintptr(0x3FC88000)
-	dramEnd := uintptr(0x3FCF0000)
-	if uintptr(metadataStart) < dramStart || uintptr(metadataStart) >= dramEnd {
-		print("ERROR: metadataStart is outside DRAM range!\n")
-		runtimePanic("metadataStart out of bounds")
-	}
-	if uintptr(metadataStart)+metadataSize > dramEnd {
-		print("ERROR: metadata extends beyond DRAM!\n")
-		runtimePanic("metadata extends beyond DRAM")
-	}
-
-	print("GC initHeap: About to call memzero\n")
 	memzero(unsafe.Pointer(metadataStart), metadataSize)
-	print("GC initHeap: memzero completed successfully\n")
 }
 
 // setHeapEnd is called to expand the heap. The heap can only grow, not shrink.
@@ -316,30 +287,6 @@ func calculateHeapAddresses() {
 	// Use the rest of the available memory as heap.
 	numBlocks := (uintptr(metadataStart) - heapStart) / bytesPerBlock
 	endBlock = gcBlock(numBlocks)
-	// Always print debug info for ESP32-S3 to diagnose the issue
-	print("calculateHeapAddresses:\n")
-	print("  heapStart: ")
-	printptr(heapStart)
-	print("\n")
-	print("  heapEnd: ")
-	printptr(heapEnd)
-	print("\n")
-	print("  total size: ")
-	printint32(int32(totalSize))
-	print(" bytes\n")
-	print("  metadata size: ")
-	printint32(int32(metadataSize))
-	print(" bytes\n")
-	print("  metadataStart: ")
-	printptr(uintptr(metadataStart))
-	print("\n")
-	print("  # of blocks: ")
-	printint32(int32(numBlocks))
-	print("\n")
-	print("  # of block states: ")
-	printint32(int32(metadataSize * blocksPerStateByte))
-	print("\n")
-
 	if gcDebug {
 		println("heapStart:        ", heapStart)
 		println("heapEnd:          ", heapEnd)
