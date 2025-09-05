@@ -39,16 +39,23 @@ func initTimer() {
 	//   EN:       Enable the timer.
 	//   INCREASE: Count up every tick (as opposed to counting down).
 	//   DIVIDER:  16-bit prescaler, set to 2 for dividing the APB clock by two
-	//             (40MHz).
-	// esp.TIMG0.T0CONFIG.Set(0 << esp.TIMG_T0CONFIG_T0_EN_Pos)
-	//esp.TIMG0.T0CONFIG.Set(esp.TIMG_TCONFIG_T0_EN | esp.TIMG_TCONFIG_T0_INCREASE | 2<<esp.TIMG_TCONFIG_T0_DIVIDER_Pos)
-	// esp.TIMG0.T0CONFIG.Set(1 << esp.TIMG_T0CONFIG_T0_DIVCNT_RST_Pos)
-	// esp.TIMG0.T0CONFIG.Set(esp.TIMG_T0CONFIG_T0_EN)
+	//             (80MHz / 2 = 40MHz).
+
+	// First disable the timer
+	esp.TIMG0.T0CONFIG.Set(0)
 
 	// Set the timer counter value to 0.
 	esp.TIMG0.T0LOADLO.Set(0)
 	esp.TIMG0.T0LOADHI.Set(0)
-	esp.TIMG0.T0LOAD.Set(0) // value doesn't matter.
+	esp.TIMG0.T0LOAD.Set(0) // Trigger reload
+
+	// Configure timer using ESP32-S3 specific methods:
+	esp.TIMG0.SetT0CONFIG_DIVIDER(2)    // Set prescaler to 2 (80MHz / 2 = 40MHz)
+	esp.TIMG0.SetT0CONFIG_INCREASE(1)   // Count up
+	esp.TIMG0.SetT0CONFIG_AUTORELOAD(0) // No auto-reload
+	esp.TIMG0.SetT0CONFIG_EN(1)         // Enable timer
+
+	print("initTimer(): Timer configured and enabled\n")
 }
 
 func ticks() timeUnit {
@@ -56,7 +63,10 @@ func ticks() timeUnit {
 	// register. This allows reading the pair atomically.
 	esp.TIMG0.T0UPDATE.Set(0)
 	// Then read the two 32-bit parts of the timer.
-	return timeUnit(uint64(esp.TIMG0.T0LO.Get()) | uint64(esp.TIMG0.T0HI.Get())<<32)
+	lo := esp.TIMG0.T0LO.Get()
+	hi := esp.TIMG0.T0HI.Get()
+	result := timeUnit(uint64(lo) | uint64(hi)<<32)
+	return result
 }
 
 func nanosecondsToTicks(ns int64) timeUnit {
