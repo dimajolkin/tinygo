@@ -73,6 +73,7 @@ const (
 	GPIO44 Pin = 44
 	GPIO45 Pin = 45
 	GPIO46 Pin = 46
+	GPIO48 Pin = 48
 )
 
 // Configure this pin with the given configuration.
