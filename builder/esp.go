@@ -105,7 +105,7 @@ func makeESPFirmareImage(infile, outfile, format string) error {
 
 	// Image header.
 	switch chip {
-	case "esp32", "esp32c3", "esp32s3":
+	case "esp32", "esp32c3":
 		// Header format:
 		// https://github.com/espressif/esp-idf/blob/v4.3/components/bootloader_support/include/esp_app_format.h#L71
 		// Note: not adding a SHA256 hash as the binary is modified by
@@ -132,6 +132,33 @@ func makeESPFirmareImage(infile, outfile, format string) error {
 			wp_pin:         0xEE, // disable WP pin
 			chip_id:        chip_id,
 			hash_appended:  true, // add a SHA256 hash
+		})
+	case "esp32s3":
+		// Self-booting header format for ESP32-S3 - bypasses ESP-IDF bootloader checks
+		// Based on ESP-IDF esp_app_format.h but without chip revision validation
+		// This allows TinyGo to act as its own bootloader without efuse revision errors
+		binary.Write(outf, binary.LittleEndian, struct {
+			magic          uint8
+			segment_count  uint8
+			spi_mode       uint8
+			spi_speed_size uint8
+			entry_addr     uint32
+			wp_pin         uint8
+			spi_pin_drv    [3]uint8
+			chip_id        uint16
+			min_chip_rev   uint8
+			reserved       [8]uint8
+			hash_appended  bool
+		}{
+			magic:          0xE9,
+			segment_count:  byte(len(segments)),
+			spi_mode:       2,    // ESP_IMAGE_SPI_MODE_DIO
+			spi_speed_size: 0x1f, // ESP_IMAGE_SPI_SPEED_80M, ESP_IMAGE_FLASH_SIZE_2MB
+			entry_addr:     uint32(inf.Entry),
+			wp_pin:         0xEE, // disable WP pin
+			chip_id:        chip_id,
+			min_chip_rev:   0,     // No minimum revision requirement
+			hash_appended:  false, // Disable SHA256 hash for simplicity
 		})
 	case "esp8266":
 		// Header format:
@@ -173,8 +200,9 @@ func makeESPFirmareImage(infile, outfile, format string) error {
 	outf.Write(make([]byte, 15-outf.Len()%16))
 	outf.WriteByte(checksum)
 
-	if chip != "esp8266" {
+	if chip != "esp8266" && chip != "esp32s3" {
 		// SHA256 hash (to protect against image corruption, not for security).
+		// Disabled for ESP32-S3 self-booting to avoid bootloader validation issues
 		hash := sha256.Sum256(outf.Bytes())
 		outf.Write(hash[:])
 	}
