@@ -104,3 +104,6 @@ cd /Users/dimajolkin/GolandProjects/tinigo-example
 Нужно сравнить structure ESP binary image между TinyGo и ESP-IDF, особенно в `builder/esp.go` где происходит конвертация ELF → BIN.
 
 /Users/dimajolkin/GolandProjects/tinigo-example
+
+
+Не нужно делать постых реализаций без разрешения.

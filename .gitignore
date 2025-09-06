@@ -45,4 +45,4 @@ test.wasm
 wasm.wasm
 
 *.uf2
-*.elf
+*.elf.curso

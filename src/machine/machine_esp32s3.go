@@ -19,10 +19,6 @@ func CPUFrequency() uint32 {
 	return 160e6 // 80 MHz
 }
 
-var (
-	ErrInvalidSPIBus = errors.New("machine: invalid SPI bus")
-)
-
 const (
 	PinOutput PinMode = iota
 	PinInput
