@@ -200,9 +200,8 @@ func makeESPFirmareImage(infile, outfile, format string) error {
 	outf.Write(make([]byte, 15-outf.Len()%16))
 	outf.WriteByte(checksum)
 
-	if chip != "esp8266" && chip != "esp32s3" {
+	if chip != "esp8266" {
 		// SHA256 hash (to protect against image corruption, not for security).
-		// Disabled for ESP32-S3 self-booting to avoid bootloader validation issues
 		hash := sha256.Sum256(outf.Bytes())
 		outf.Write(hash[:])
 	}

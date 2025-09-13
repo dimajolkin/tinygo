@@ -2,7 +2,8 @@
 
 package machine
 
-// ESP32-S3 SPI support based on ESP32-C3 implementation
+// ESP32-S3 SPI support based on ESP-IDF HAL
+// Simple but correct implementation following spi_ll.h
 // SPI0 = hardware SPI2 (FSPI), SPI1 = hardware SPI3 (HSPI)
 // https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/api-reference/peripherals/spi_master.html
 
@@ -20,25 +21,26 @@ const (
 	SPI_MODE3 = uint8(3)
 )
 
-// ESP32-S3 GPIO Matrix signal indices for SPI
+// ESP32-S3 GPIO Matrix signal indices for SPI - CORRECTED from ESP-IDF gpio_sig_map.h
 const (
-	// SPI2 (FSPI) signals - Hardware SPI2
-	SPI2_CLK_OUT_IDX = uint32(63)
-	SPI2_CLK_IN_IDX  = uint32(63)
-	SPI2_Q_OUT_IDX   = uint32(64) // MISO
-	SPI2_Q_IN_IDX    = uint32(64)
-	SPI2_D_OUT_IDX   = uint32(65) // MOSI
-	SPI2_D_IN_IDX    = uint32(65)
-	SPI2_CS0_OUT_IDX = uint32(68)
+	// SPI2 (FSPI) signals - Hardware SPI2 - CORRECT VALUES from ESP-IDF
+	SPI2_CLK_OUT_IDX = uint32(101) // FSPICLK_OUT_IDX
+	SPI2_CLK_IN_IDX  = uint32(101) // FSPICLK_IN_IDX
+	SPI2_Q_OUT_IDX   = uint32(102) // FSPIQ_OUT_IDX (MISO)
+	SPI2_Q_IN_IDX    = uint32(102) // FSPIQ_IN_IDX
+	SPI2_D_OUT_IDX   = uint32(103) // FSPID_OUT_IDX (MOSI)
+	SPI2_D_IN_IDX    = uint32(103) // FSPID_IN_IDX
+	SPI2_CS0_OUT_IDX = uint32(110) // FSPICS0_OUT_IDX
 
-	// SPI3 (HSPI) signals - Hardware SPI3
-	SPI3_CLK_OUT_IDX = uint32(74)
-	SPI3_CLK_IN_IDX  = uint32(74)
-	SPI3_Q_OUT_IDX   = uint32(75) // MISO
-	SPI3_Q_IN_IDX    = uint32(75)
-	SPI3_D_OUT_IDX   = uint32(76) // MOSI
-	SPI3_D_IN_IDX    = uint32(76)
-	SPI3_CS0_OUT_IDX = uint32(79)
+	// SPI3 (HSPI) signals - Hardware SPI3 - CORRECTED from ESP-IDF gpio_sig_map.h
+	// Source: /Users/dimajolkin/esp/esp-idf/components/soc/esp32s3/include/soc/gpio_sig_map.h
+	SPI3_CLK_OUT_IDX = uint32(66) // Line 136: SPI3_CLK_OUT_IDX
+	SPI3_CLK_IN_IDX  = uint32(66) // Line 135: SPI3_CLK_IN_IDX
+	SPI3_Q_OUT_IDX   = uint32(67) // Line 138: SPI3_Q_OUT_IDX (MISO)
+	SPI3_Q_IN_IDX    = uint32(67) // Line 137: SPI3_Q_IN_IDX
+	SPI3_D_OUT_IDX   = uint32(68) // Line 140: SPI3_D_OUT_IDX (MOSI)
+	SPI3_D_IN_IDX    = uint32(68) // Line 139: SPI3_D_IN_IDX
+	SPI3_CS0_OUT_IDX = uint32(71) // Line 146: SPI3_CS0_OUT_IDX
 )
 
 var (
@@ -68,15 +70,16 @@ type SPIConfig struct {
 }
 
 // Configure and make the SPI peripheral ready to use.
+// Implementation following ESP-IDF HAL with GPIO Matrix routing
 func (spi *SPI) Configure(config SPIConfig) error {
+
 	// Set default frequency if not specified
 	if config.Frequency == 0 {
 		config.Frequency = 1000000 // Default to 1MHz
 	}
 
-	// Configure GPIO pins and matrix routing
+	// Get GPIO Matrix signal indices for this SPI bus
 	var sckOutIdx, mosiOutIdx, misoInIdx, csOutIdx uint32
-
 	switch spi.busID {
 	case 2: // SPI2 (FSPI)
 		sckOutIdx = SPI2_CLK_OUT_IDX
@@ -92,170 +95,246 @@ func (spi *SPI) Configure(config SPIConfig) error {
 		return ErrInvalidSPIBus
 	}
 
-	// Configure GPIO pins with matrix routing
-	if config.SCK != NoPin {
-		config.SCK.Configure(PinConfig{Mode: PinOutput})
-		config.SCK.outFunc().Set(sckOutIdx)
-	}
-	if config.SDO != NoPin {
-		config.SDO.Configure(PinConfig{Mode: PinOutput})
-		config.SDO.outFunc().Set(mosiOutIdx)
-	}
-	if config.SDI != NoPin {
-		config.SDI.Configure(PinConfig{Mode: PinInput})
-		inFunc(misoInIdx).Set(esp.GPIO_FUNC_IN_SEL_CFG_SEL | uint32(config.SDI))
-	}
-	if config.CS != NoPin {
-		config.CS.Configure(PinConfig{Mode: PinOutput})
-		config.CS.outFunc().Set(csOutIdx)
-	}
+	// Configure GPIO pins using GPIO Matrix routing
+	// Note: We use GPIO Matrix instead of IO MUX for flexibility
 
-	// Only busID 2 and 3 are supported (hardware SPI2/SPI3, exposed as SPI0/SPI1)
+	// Configure GPIO pins using GPIO Matrix routing
+	configureSPIGPIOMatrix(config, sckOutIdx, mosiOutIdx, misoInIdx, csOutIdx)
+
+	// Enable peripheral clock and reset
+	// Without bootloader, we need to be more explicit about clock initialization
 	switch spi.busID {
-	case 2: // Hardware SPI2 (FSPI) - exposed as SPI0 for users
+	case 2: // Hardware SPI2 (FSPI)
 		esp.SYSTEM.SetPERIP_CLK_EN0_SPI2_CLK_EN(1)
 		esp.SYSTEM.SetPERIP_RST_EN0_SPI2_RST(1)
 		esp.SYSTEM.SetPERIP_RST_EN0_SPI2_RST(0)
-
-		// Cast to correct type for SPI2
-		if bus, ok := spi.Bus.(*esp.SPI2_Type); ok {
-			// Initialize SPI master following ESP-IDF HAL spi_ll_master_init exactly
-			// Reset timing
-			bus.USER1.Set(0) // cs_setup_time = 0, cs_hold_time = 0
-
-			// Use all 64 bytes of the buffer
-			bus.SetUSER_USR_MISO_HIGHPART(0)
-			bus.SetUSER_USR_MOSI_HIGHPART(0)
-
-			// Disable unneeded ints
-			bus.SLAVE.Set(0)
-			bus.USER.Set(0)
-
-			// Configure master clock gate
-			bus.SetCLK_GATE_MST_CLK_ACTIVE(1)
-			bus.SetCLK_GATE_MST_CLK_SEL(1)
-
-			// Configure DMA
-			bus.DMA_CONF.Set(0)
-			bus.SetDMA_CONF_SLV_TX_SEG_TRANS_CLR_EN(1)
-			bus.SetDMA_CONF_SLV_RX_SEG_TRANS_CLR_EN(1)
-			// dma_seg_trans_en = 0 (already 0 from DMA_CONF.Set(0))
-
-			// Configure master mode
-			bus.SetUSER_USR_MOSI(1)     // Enable MOSI
-			bus.SetUSER_USR_MISO(1)     // Enable MISO
-			bus.SetUSER_DOUTDIN(1)      // Full-duplex mode
-			bus.SetCTRL_WR_BIT_ORDER(0) // MSB first
-			bus.SetCTRL_RD_BIT_ORDER(0) // MSB first
-
-			// Configure SPI mode (CPOL/CPHA)
-			switch config.Mode {
-			case SPI_MODE0:
-				// CPOL=0, CPHA=0 (default)
-			case SPI_MODE1:
-				bus.SetUSER_CK_OUT_EDGE(1) // CPHA=1
-			case SPI_MODE2:
-				bus.SetMISC_CK_IDLE_EDGE(1) // CPOL=1
-				bus.SetUSER_CK_OUT_EDGE(1)  // CPHA=1
-			case SPI_MODE3:
-				bus.SetMISC_CK_IDLE_EDGE(1) // CPOL=1
-			}
-
-			// Set clock divider for frequency
-			// ESP32-S3 APB clock is typically 80MHz
-			divider := uint32(80000000 / config.Frequency)
-			if divider < 1 {
-				divider = 1
-			}
-			if divider > 0x3F {
-				divider = 0x3F
-			}
-
-			// Configure clock
-			bus.CLOCK.Set(0)
-			bus.SetCLOCK_CLK_EQU_SYSCLK(0)
-			bus.SetCLOCK_CLKDIV_PRE(divider - 1)
-			bus.SetCLOCK_CLKCNT_N(divider - 1)
-			bus.SetCLOCK_CLKCNT_H((divider / 2) - 1)
-			bus.SetCLOCK_CLKCNT_L(divider - 1)
-		}
-
-	case 3: // Hardware SPI3 (HSPI) - exposed as SPI1 for users
+	case 3: // Hardware SPI3 (HSPI)
 		esp.SYSTEM.SetPERIP_CLK_EN0_SPI3_CLK_EN(1)
 		esp.SYSTEM.SetPERIP_RST_EN0_SPI3_RST(1)
 		esp.SYSTEM.SetPERIP_RST_EN0_SPI3_RST(0)
+	}
 
-		// Cast to correct type for SPI3 (uses SPI2_Type structure)
-		if bus, ok := spi.Bus.(*esp.SPI2_Type); ok {
-			// Initialize SPI master following ESP-IDF HAL spi_ll_master_init exactly
-			// Reset timing
-			bus.USER1.Set(0) // cs_setup_time = 0, cs_hold_time = 0
-
-			// Use all 64 bytes of the buffer
-			bus.SetUSER_USR_MISO_HIGHPART(0)
-			bus.SetUSER_USR_MOSI_HIGHPART(0)
-
-			// Disable unneeded ints
-			bus.SLAVE.Set(0)
-			bus.USER.Set(0)
-
-			// Configure master clock gate
-			bus.SetCLK_GATE_MST_CLK_ACTIVE(1)
-			bus.SetCLK_GATE_MST_CLK_SEL(1)
-
-			// Configure DMA
-			bus.DMA_CONF.Set(0)
-			bus.SetDMA_CONF_SLV_TX_SEG_TRANS_CLR_EN(1)
-			bus.SetDMA_CONF_SLV_RX_SEG_TRANS_CLR_EN(1)
-			// dma_seg_trans_en = 0 (already 0 from DMA_CONF.Set(0))
-
-			// Configure master mode
-			bus.SetUSER_USR_MOSI(1)     // Enable MOSI
-			bus.SetUSER_USR_MISO(1)     // Enable MISO
-			bus.SetUSER_DOUTDIN(1)      // Full-duplex mode
-			bus.SetCTRL_WR_BIT_ORDER(0) // MSB first
-			bus.SetCTRL_RD_BIT_ORDER(0) // MSB first
-
-			// Configure SPI mode (CPOL/CPHA)
-			switch config.Mode {
-			case SPI_MODE0:
-				// CPOL=0, CPHA=0 (default)
-			case SPI_MODE1:
-				bus.SetUSER_CK_OUT_EDGE(1) // CPHA=1
-			case SPI_MODE2:
-				bus.SetMISC_CK_IDLE_EDGE(1) // CPOL=1
-				bus.SetUSER_CK_OUT_EDGE(1)  // CPHA=1
-			case SPI_MODE3:
-				bus.SetMISC_CK_IDLE_EDGE(1) // CPOL=1
-			}
-
-			// Set clock divider for frequency
-			divider := uint32(80000000 / config.Frequency)
-			if divider < 1 {
-				divider = 1
-			}
-			if divider > 0x3F {
-				divider = 0x3F
-			}
-
-			// Configure clock
-			bus.CLOCK.Set(0)
-			bus.SetCLOCK_CLK_EQU_SYSCLK(0)
-			bus.SetCLOCK_CLKDIV_PRE(divider - 1)
-			bus.SetCLOCK_CLKCNT_N(divider - 1)
-			bus.SetCLOCK_CLKCNT_H((divider / 2) - 1)
-			bus.SetCLOCK_CLKCNT_L(divider - 1)
-		}
-
-	default:
+	// Get bus handle - both SPI2 and SPI3 use SPI2_Type
+	bus, ok := spi.Bus.(*esp.SPI2_Type)
+	if !ok {
 		return ErrInvalidSPIBus
 	}
+
+	// Reset timing: cs_setup_time = 0, cs_hold_time = 0
+	bus.USER1.Set(0)
+
+	// Use all 64 bytes of the buffer
+	bus.SetUSER_USR_MISO_HIGHPART(0)
+	bus.SetUSER_USR_MOSI_HIGHPART(0)
+
+	// Disable unneeded interrupts and clear all USER bits first
+	bus.SLAVE.Set(0)
+	bus.USER.Set(0)
+
+	// Clear other important registers like ESP32-C3
+	bus.MISC.Set(0)
+	bus.CTRL.Set(0)
+	bus.CLOCK.Set(0)
+
+	// Clear data buffers like ESP32-C3
+	bus.W0.Set(0)
+	bus.W1.Set(0)
+	bus.W2.Set(0)
+	bus.W3.Set(0)
+
+	// Configure master clock gate - CRITICAL: need CLK_EN bit!
+	bus.SetCLK_GATE_CLK_EN(1)         // Enable basic SPI clock (bit 0)
+	bus.SetCLK_GATE_MST_CLK_ACTIVE(1) // Enable master clock (bit 1)
+	bus.SetCLK_GATE_MST_CLK_SEL(1)    // Select master clock (bit 2)
+
+	// Configure DMA following ESP-IDF HAL
+	// Reset DMA configuration
+	bus.DMA_CONF.Set(0)
+	// Set DMA segment transaction clear enable bits
+	bus.SetDMA_CONF_SLV_TX_SEG_TRANS_CLR_EN(1)
+	bus.SetDMA_CONF_SLV_RX_SEG_TRANS_CLR_EN(1)
+	// dma_seg_trans_en = 0 (already 0 from DMA_CONF.Set(0))
+
+	// Configure master mode
+	bus.SetUSER_USR_MOSI(1)     // Enable MOSI
+	bus.SetUSER_USR_MISO(1)     // Enable MISO
+	bus.SetUSER_DOUTDIN(1)      // Full-duplex mode
+	bus.SetCTRL_WR_BIT_ORDER(0) // MSB first
+	bus.SetCTRL_RD_BIT_ORDER(0) // MSB first
+
+	// CRITICAL: Enable clock output (from working test)
+	bus.SetMISC_CK_DIS(0) // Enable CLK output - THIS IS KEY!
+
+	// Configure SPI mode (CPOL/CPHA) following ESP-IDF HAL
+	switch config.Mode {
+	case SPI_MODE0:
+		// CPOL=0, CPHA=0 (default)
+	case SPI_MODE1:
+		bus.SetUSER_CK_OUT_EDGE(1) // CPHA=1
+	case SPI_MODE2:
+		bus.SetMISC_CK_IDLE_EDGE(1) // CPOL=1
+		bus.SetUSER_CK_OUT_EDGE(1)  // CPHA=1
+	case SPI_MODE3:
+		bus.SetMISC_CK_IDLE_EDGE(1) // CPOL=1
+	}
+
+	// Calculate clock divider for frequency
+	// ESP32-S3 APB clock is typically 80MHz
+	apbClock := uint32(80000000)
+
+	// Try to get actual CPU frequency for better APB clock estimation
+	if cpuFreq := CPUFrequency(); cpuFreq > 0 {
+		if cpuFreq <= 80000000 {
+			apbClock = cpuFreq // APB = CPU for frequencies <= 80MHz
+		} else {
+			apbClock = cpuFreq / 4 // APB = CPU/4 for higher frequencies
+		}
+	}
+
+	// Calculate divider, ensuring it's within valid range
+	divider := apbClock / config.Frequency
+	if divider < 1 {
+		divider = 1
+	}
+	if divider > 0x3F {
+		divider = 0x3F // Maximum divider value
+	}
+
+	// Configure clock (after clearing CLOCK register above)
+	bus.SetCLOCK_CLK_EQU_SYSCLK(0)
+	bus.SetCLOCK_CLKDIV_PRE(divider - 1)
+	bus.SetCLOCK_CLKCNT_N(divider - 1)
+	bus.SetCLOCK_CLKCNT_H((divider / 2) - 1)
+	bus.SetCLOCK_CLKCNT_L(divider - 1)
 
 	return nil
 }
 
+// configureSPIIOIMUX настраивает SPI пины через IO MUX для прямого подключения
+func configureSPIIOIMUX(config SPIConfig) {
+	println("DEBUG: Configuring IO MUX for direct SPI hardware connection")
+
+	// Определяем функцию IO MUX в зависимости от набора пинов
+	var function uint32
+	if config.SCK == 36 && config.SDO == 35 {
+		function = 4 // Try function 4 instead of 2 - maybe ESP32-S3 uses same function for both pin sets
+		println("DEBUG: Using Octal SPI pin set (function 4 - testing)")
+	} else if config.SCK == 12 && config.SDO == 11 {
+		function = 4 // SPI2_FUNC_NUM - Standard SPI pins
+		println("DEBUG: Using standard SPI pin set (function 4)")
+	} else {
+		println("ERROR: Unsupported IO MUX pin combination")
+		return
+	}
+
+	// Настраиваем IO MUX регистры напрямую
+	// IO_MUX base: 0x60009000
+	if config.SCK != NoPin {
+		println("DEBUG: Setting up SCK pin", uint8(config.SCK), "with IO MUX function", function)
+		configureIOIMUXPin(config.SCK, function, true) // output
+	}
+	if config.SDO != NoPin {
+		println("DEBUG: Setting up SDO pin", uint8(config.SDO), "with IO MUX function", function)
+		configureIOIMUXPin(config.SDO, function, true) // output
+	}
+	if config.SDI != NoPin {
+		println("DEBUG: Setting up SDI pin", uint8(config.SDI), "with IO MUX function", function)
+		configureIOIMUXPin(config.SDI, function, false) // input
+	}
+	if config.CS != NoPin {
+		println("DEBUG: Setting up CS pin", uint8(config.CS), "with IO MUX function", function)
+		configureIOIMUXPin(config.CS, function, true) // output
+	}
+}
+
+// configureIOIMUXPin настраивает один пин через IO MUX
+func configureIOIMUXPin(pin Pin, function uint32, isOutput bool) {
+	// IO_MUX регистр для каждого пина: IO_MUX_GPIOn_REG
+	// Базовый адрес: 0x60009000 + pin_offset
+	// Смещения для пинов можно найти в soc/io_mux_reg.h
+
+	var iomuxReg *volatile.Register32
+	switch pin {
+	case 10:
+		iomuxReg = (*volatile.Register32)(unsafe.Pointer(uintptr(0x60009040))) // IO_MUX_GPIO10_REG
+	case 11:
+		iomuxReg = (*volatile.Register32)(unsafe.Pointer(uintptr(0x60009044))) // IO_MUX_GPIO11_REG
+	case 12:
+		iomuxReg = (*volatile.Register32)(unsafe.Pointer(uintptr(0x60009048))) // IO_MUX_GPIO12_REG
+	case 13:
+		iomuxReg = (*volatile.Register32)(unsafe.Pointer(uintptr(0x6000904C))) // IO_MUX_GPIO13_REG
+	case 34:
+		iomuxReg = (*volatile.Register32)(unsafe.Pointer(uintptr(0x6000908C))) // IO_MUX_GPIO34_REG
+	case 35:
+		iomuxReg = (*volatile.Register32)(unsafe.Pointer(uintptr(0x60009090))) // IO_MUX_GPIO35_REG
+	case 36:
+		iomuxReg = (*volatile.Register32)(unsafe.Pointer(uintptr(0x60009094))) // IO_MUX_GPIO36_REG
+	case 37:
+		iomuxReg = (*volatile.Register32)(unsafe.Pointer(uintptr(0x60009098))) // IO_MUX_GPIO37_REG
+	default:
+		println("ERROR: Pin", uint8(pin), "not supported for IO MUX")
+		return
+	}
+
+	// Читаем текущее значение
+	current := iomuxReg.Get()
+	println("DEBUG: GPIO", uint8(pin), "IO MUX before:", formatHex(current))
+
+	// Настраиваем IO MUX регистр
+	// Биты 12-14: MCU_SEL (function select)
+	// Бит 8: FUN_PU (pull-up enable)
+	// Биты 10-11: FUN_DRV (drive strength)
+	// Бит 9: FUN_PD (pull-down enable) - должен быть 0
+	newValue := current & ^uint32(0x7000) // Очищаем MCU_SEL (биты 12-14)
+	newValue &= ^uint32(0x200)            // Очищаем FUN_PD (бит 9)
+	newValue |= function << 12            // Устанавливаем функцию
+	newValue |= 1 << 8                    // Включаем pull-up (FUN_PU)
+	newValue |= 3 << 10                   // Максимальная сила тока (FUN_DRV = 3)
+
+	println("DEBUG: GPIO", uint8(pin), "setting function", function, "drive=3, pullup=1")
+	iomuxReg.Set(newValue)
+
+	// Проверяем что записалось
+	verify := iomuxReg.Get()
+	println("DEBUG: GPIO", uint8(pin), "IO MUX after:", formatHex(verify))
+	if verify != newValue {
+		println("WARNING: GPIO", uint8(pin), "IO MUX verification failed! Expected:", formatHex(newValue), "Got:", formatHex(verify))
+	}
+
+	// Включаем GPIO как выход/вход
+	if isOutput {
+		if pin < 32 {
+			esp.GPIO.ENABLE_W1TS.Set(1 << pin)
+		} else {
+			esp.GPIO.ENABLE1_W1TS.Set(1 << (pin - 32))
+		}
+		println("DEBUG: GPIO", uint8(pin), "enabled as output")
+	} else {
+		// Для входа просто убеждаемся, что он не в режиме выхода
+		if pin < 32 {
+			esp.GPIO.ENABLE_W1TC.Set(1 << pin)
+		} else {
+			esp.GPIO.ENABLE1_W1TC.Set(1 << (pin - 32))
+		}
+		println("DEBUG: GPIO", uint8(pin), "configured as input")
+	}
+}
+
+func formatHex(val uint32) string {
+	hex := "0x"
+	digits := "0123456789ABCDEF"
+
+	for i := 7; i >= 0; i-- {
+		hex += string(digits[(val>>(i*4))&0xF])
+	}
+
+	return hex
+}
+
 // Transfer writes/reads a single byte using the SPI interface.
+// Implementation following ESP-IDF HAL spi_ll_user_start with proper USER register setup
 func (spi *SPI) Transfer(w byte) (byte, error) {
+	// Both SPI2 and SPI3 use SPI2_Type
 	bus, ok := spi.Bus.(*esp.SPI2_Type)
 	if !ok {
 		return 0, errors.New("invalid SPI bus type")
@@ -264,104 +343,123 @@ func (spi *SPI) Transfer(w byte) (byte, error) {
 	// Set transfer length (8 bits = 7 in register)
 	bus.SetMS_DLEN_MS_DATA_BITLEN(7)
 
-	// Write data to buffer
+	// Clear any pending interrupt flags BEFORE starting transaction
+	bus.SetDMA_INT_CLR_TRANS_DONE_INT_CLR(1)
+
+	// Write data to buffer (use W0 register)
 	bus.W0.Set(uint32(w))
 
-	// Start transaction and wait for completion (like ESP32-C3)
-	bus.SetCMD_USR(1)
-	for bus.GetCMD_USR() != 0 {
-		// Wait until CMD_USR becomes 0
+	// CRITICAL: Apply configuration before transmission (like ESP-IDF spi_ll_apply_config)
+	bus.SetCMD_UPDATE(1)
+	for bus.GetCMD_UPDATE() != 0 {
+		// Wait for config to be applied
 	}
 
-	// Read received data
-	return byte(bus.GetW0() & 0xFF), nil
+	// Start transaction following ESP-IDF HAL spi_ll_user_start
+	bus.SetCMD_USR(1)
+
+	// Wait for completion using CMD_USR flag (like ESP32-C3 approach)
+	// Hardware clears CMD_USR when transaction is complete
+	timeout := 100000
+	for bus.GetCMD_USR() != 0 && timeout > 0 {
+		timeout--
+		// Wait for CMD_USR to be cleared by hardware
+	}
+
+	if timeout == 0 {
+		return 0, errors.New("SPI transfer timeout")
+	}
+
+	// Read received data from W0 register
+	result := byte(bus.W0.Get() & 0xFF)
+	return result, nil
 }
 
 // Tx handles read/write operation for SPI interface.
+// Simple implementation using ESP-IDF HAL approach - byte by byte for now
 func (spi *SPI) Tx(w, r []byte) error {
-	bus, ok := spi.Bus.(*esp.SPI2_Type)
-	if !ok {
-		return errors.New("invalid SPI bus type")
+	// For simplicity, process byte by byte using Transfer
+	// This is not efficient but correct and simple
+	maxLen := len(w)
+	if len(r) > maxLen {
+		maxLen = len(r)
 	}
 
-	toTransfer := len(w)
-	if len(r) > toTransfer {
-		toTransfer = len(r)
-	}
-
-	for toTransfer > 0 {
-		// Chunk 64 bytes at a time (like ESP32-C3)
-		chunkSize := toTransfer
-		if chunkSize > 64 {
-			chunkSize = 64
+	for i := 0; i < maxLen; i++ {
+		var writeByte byte = 0
+		if i < len(w) {
+			writeByte = w[i]
 		}
 
-		// Fill tx buffer using unsafe.Pointer for fast access (like ESP32-C3)
-		transferWords := (*[16]volatile.Register32)(unsafe.Pointer(uintptr(unsafe.Pointer(&bus.W0))))
-		if len(w) >= 64 {
-			// Optimized path for full 64-byte buffers
-			for i := 0; i < 16; i++ {
-				word := uint32(w[i*4]) | uint32(w[i*4+1])<<8 | uint32(w[i*4+2])<<16 | uint32(w[i*4+3])<<24
-				transferWords[i].Set(word)
-			}
-		} else {
-			// Careful approach for partial buffers
-			for i := 0; i < 16; i++ {
-				var word uint32
-				if i*4+3 < len(w) {
-					word |= uint32(w[i*4+3]) << 24
-				}
-				if i*4+2 < len(w) {
-					word |= uint32(w[i*4+2]) << 16
-				}
-				if i*4+1 < len(w) {
-					word |= uint32(w[i*4+1]) << 8
-				}
-				if i*4+0 < len(w) {
-					word |= uint32(w[i*4+0]) << 0
-				}
-				transferWords[i].Set(word)
-			}
+		readByte, err := spi.Transfer(writeByte)
+		if err != nil {
+			return err
 		}
 
-		// Do the transfer (like ESP32-C3)
-		bus.SetMS_DLEN_MS_DATA_BITLEN(uint32(chunkSize)*8 - 1)
-
-		// Note: ESP32-S3 might not have CMD_UPDATE like ESP32-C3, so we skip it
-		// Start transaction
-		bus.SetCMD_USR(1)
-
-		// Add timeout to prevent hanging
-		timeout := 100000
-		for bus.GetCMD_USR() != 0 && timeout > 0 {
-			timeout--
+		if i < len(r) {
+			r[i] = readByte
 		}
-		if timeout == 0 {
-			return errors.New("SPI timeout in Tx")
-		}
-
-		// Read rx buffer
-		rxSize := chunkSize
-		if rxSize > len(r) {
-			rxSize = len(r)
-		}
-		for i := 0; i < rxSize; i++ {
-			r[i] = byte(transferWords[i/4].Get() >> ((i % 4) * 8))
-		}
-
-		// Move to next chunk (like ESP32-C3)
-		if len(w) < chunkSize {
-			w = nil
-		} else {
-			w = w[chunkSize:]
-		}
-		if len(r) < chunkSize {
-			r = nil
-		} else {
-			r = r[chunkSize:]
-		}
-		toTransfer -= chunkSize
 	}
 
 	return nil
+}
+
+// configureSPIGPIOMatrix configures SPI pins using GPIO Matrix routing
+// This provides more flexibility than IO MUX and is required for proper signal routing
+func configureSPIGPIOMatrix(config SPIConfig, sckOutIdx, mosiOutIdx, misoInIdx, csOutIdx uint32) {
+	// Configure SCK (Clock) pin
+	if config.SCK != NoPin {
+		configurePinForSPI(config.SCK, sckOutIdx, PinOutput)
+	}
+
+	// Configure SDO (MOSI) pin
+	if config.SDO != NoPin {
+		configurePinForSPI(config.SDO, mosiOutIdx, PinOutput)
+	}
+
+	// Configure SDI (MISO) pin
+	if config.SDI != NoPin {
+		configurePinForSPI(config.SDI, misoInIdx, PinInput)
+		// Configure input routing for MISO
+		inFunc(misoInIdx).Set(esp.GPIO_FUNC_IN_SEL_CFG_SEL | uint32(config.SDI))
+	}
+
+	// Configure CS (Chip Select) pin
+	if config.CS != NoPin {
+		configurePinForSPI(config.CS, csOutIdx, PinOutput)
+	}
+}
+
+// configurePinForSPI configures a single pin for SPI using direct GPIO matrix setup
+// This ensures proper signal routing that works reliably
+func configurePinForSPI(pin Pin, signal uint32, mode PinMode) {
+	if pin == NoPin {
+		return
+	}
+
+	pinNum := uint32(pin)
+
+	// Enable GPIO output/input
+	if mode == PinOutput {
+		esp.GPIO.ENABLE_W1TS.Set(1 << pinNum)
+	}
+
+	// Configure IO MUX for GPIO function (not dedicated peripheral function)
+	// This allows GPIO Matrix to control the pin
+	// Use the same address calculation as in working test
+	// Working test used 0x60009048 for GPIO12, so: 0x60009048 - 12*4 = 0x60009018
+	iomuxAddr := uintptr(0x60009018 + pinNum*4) // Base address that gives 0x60009048 for GPIO12
+	iomux := (*volatile.Register32)(unsafe.Pointer(iomuxAddr))
+
+	// Configure: function=2 (GPIO), input_enable=1, drive_strength=3, pull_up=1
+	muxConfig := (iomux.Get() & ^uint32(0x7000)) | (2 << 12) | (1 << 8) | (3 << 10)
+	if mode == PinOutput {
+		muxConfig |= 1 << 7 // Enable pull-up for output pins
+	}
+	iomux.Set(muxConfig)
+
+	// Route signal through GPIO Matrix
+	outFuncAddr := unsafe.Add(unsafe.Pointer(&esp.GPIO.FUNC0_OUT_SEL_CFG), uintptr(pinNum)*4)
+	outFunc := (*volatile.Register32)(outFuncAddr)
+	outFunc.Set(signal)
 }

@@ -25,6 +25,7 @@ import (
 	"device"
 	"device/esp"
 	"machine"
+	"runtime/volatile"
 	"unsafe"
 )
 
@@ -35,12 +36,20 @@ import (
 // Based on ESP-IDF soc/esp32s3/include/soc/extmem_reg.h
 // EXTMEM registers are available through esp.EXTMEM
 
-// ROM cache function addresses - from ESP-IDF components/esp_rom/esp32s3/ld/esp32s3.rom.ld
+// Cache control registers - from ESP-IDF soc/esp32s3/include/soc/extmem_reg.h
 const (
-	ROM_Cache_Disable_ICache = 0x4000186c // uint32_t Cache_Disable_ICache(void)
-	ROM_Cache_Disable_DCache = 0x40001884 // uint32_t Cache_Disable_DCache(void)
-	ROM_Cache_Enable_ICache  = 0x40001878 // void Cache_Enable_ICache(uint32_t autoload)
-	ROM_Cache_Enable_DCache  = 0x40001890 // void Cache_Enable_DCache(uint32_t autoload)
+	EXTMEM_ICACHE_CTRL_REG  = 0x60008000
+	EXTMEM_DCACHE_CTRL_REG  = 0x60008044
+	EXTMEM_ICACHE_CTRL1_REG = 0x60008004
+	EXTMEM_DCACHE_CTRL1_REG = 0x60008048
+
+	// Cache enable bits
+	EXTMEM_ICACHE_ENABLE = (1 << 0)
+	EXTMEM_DCACHE_ENABLE = (1 << 0)
+
+	// Cache invalidate bits
+	EXTMEM_ICACHE_INVALIDATE = (1 << 1)
+	EXTMEM_DCACHE_INVALIDATE = (1 << 1)
 )
 
 // MMU constants - from ESP-IDF components/soc/esp32s3/include/soc/mmu.h
@@ -56,37 +65,85 @@ const (
 )
 
 // initCacheAndMMU initializes the cache and MMU system for ESP32-S3
-// Based on ESP-IDF components/bootloader_support/src/bootloader_utility.c:set_cache_and_start_app()
+// Based on ESP-IDF bootloader_utility.c:set_cache_and_start_app() but simplified for TinyGo self-boot
+// This function should be called ONLY if ROM bootloader hasn't already done this initialization
 func initCacheAndMMU() {
-	// Disable both caches before reconfiguration
-	// Implementation based on ESP-IDF hal/esp32s3/include/hal/cache_ll.h:cache_ll_l1_disable_icache/dcache
-	cacheDisableICache := *(*func() uint32)(unsafe.Pointer(uintptr(ROM_Cache_Disable_ICache)))
-	cacheDisableDCache := *(*func() uint32)(unsafe.Pointer(uintptr(ROM_Cache_Disable_DCache)))
+	// For self-booting TinyGo, we need to replicate what ESP-IDF bootloader does:
+	// 1. Disable cache
+	// 2. Reset MMU table
+	// 3. Map DROM and IROM regions
+	// 4. Enable cache
 
-	icacheAutoload := cacheDisableICache()
-	dcacheAutoload := cacheDisableDCache()
+	// Step 1: Disable cache (using HAL approach like ESP-IDF)
+	// cache_hal_disable(CACHE_LL_LEVEL_EXT_MEM, CACHE_TYPE_ALL);
+	disableCache()
 
-	// Reset MMU table - equivalent to mmu_hal_unmap_all()
-	// Based on ESP-IDF components/hal/esp32s3/include/hal/mmu_ll.h
+	// Step 2: Reset MMU table - equivalent to mmu_hal_unmap_all()
 	resetMMUTable()
 
+	// Step 3: Map flash regions
 	// Configure DROM mapping (read-only data from flash)
-	// Map flash address 0x0 to virtual address 0x3C000000 (DROM_LOW)
-	// Based on ESP-IDF bootloader_utility.c:1065-1083
 	mapDROM()
-
 	// Configure IROM mapping (instruction cache from flash)
-	// Map flash address 0x0 to virtual address 0x42000000 (IROM_LOW)
-	// Based on ESP-IDF bootloader_utility.c:1085-1103
 	mapIROM()
 
-	// Re-enable caches with autoload settings
-	// Implementation based on ESP-IDF hal/esp32s3/include/hal/cache_ll.h:cache_ll_l1_enable_icache/dcache
-	cacheEnableICache := *(*func(uint32))(unsafe.Pointer(uintptr(ROM_Cache_Enable_ICache)))
-	cacheEnableDCache := *(*func(uint32))(unsafe.Pointer(uintptr(ROM_Cache_Enable_DCache)))
+	// Step 4: Enable cache
+	// cache_hal_enable(CACHE_LL_LEVEL_EXT_MEM, CACHE_TYPE_ALL);
+	enableCache()
+}
 
-	cacheEnableICache(icacheAutoload)
-	cacheEnableDCache(dcacheAutoload)
+// disableCache disables both instruction and data caches
+// Based on ESP-IDF hal/esp32s3/include/hal/cache_ll.h:cache_ll_l1_disable_cache
+func disableCache() {
+	// Disable ICache
+	icacheCtrl := *(*uint32)(unsafe.Pointer(uintptr(EXTMEM_ICACHE_CTRL_REG)))
+	icacheCtrl &= ^uint32(EXTMEM_ICACHE_ENABLE)
+	*(*uint32)(unsafe.Pointer(uintptr(EXTMEM_ICACHE_CTRL_REG))) = icacheCtrl
+
+	// Disable DCache
+	dcacheCtrl := *(*uint32)(unsafe.Pointer(uintptr(EXTMEM_DCACHE_CTRL_REG)))
+	dcacheCtrl &= ^uint32(EXTMEM_DCACHE_ENABLE)
+	*(*uint32)(unsafe.Pointer(uintptr(EXTMEM_DCACHE_CTRL_REG))) = dcacheCtrl
+
+	// Wait for cache to be disabled
+	for {
+		icacheCtrl = *(*uint32)(unsafe.Pointer(uintptr(EXTMEM_ICACHE_CTRL_REG)))
+		dcacheCtrl = *(*uint32)(unsafe.Pointer(uintptr(EXTMEM_DCACHE_CTRL_REG)))
+		if (icacheCtrl&EXTMEM_ICACHE_ENABLE) == 0 && (dcacheCtrl&EXTMEM_DCACHE_ENABLE) == 0 {
+			break
+		}
+	}
+}
+
+// enableCache enables both instruction and data caches
+// Based on ESP-IDF hal/esp32s3/include/hal/cache_ll.h:cache_ll_l1_enable_cache
+func enableCache() {
+	// Invalidate both caches first
+	*(*uint32)(unsafe.Pointer(uintptr(EXTMEM_ICACHE_CTRL1_REG))) |= EXTMEM_ICACHE_INVALIDATE
+	*(*uint32)(unsafe.Pointer(uintptr(EXTMEM_DCACHE_CTRL1_REG))) |= EXTMEM_DCACHE_INVALIDATE
+
+	// Wait for invalidation to complete
+	for {
+		icacheCtrl1 := *(*uint32)(unsafe.Pointer(uintptr(EXTMEM_ICACHE_CTRL1_REG)))
+		dcacheCtrl1 := *(*uint32)(unsafe.Pointer(uintptr(EXTMEM_DCACHE_CTRL1_REG)))
+		if (icacheCtrl1&EXTMEM_ICACHE_INVALIDATE) == 0 && (dcacheCtrl1&EXTMEM_DCACHE_INVALIDATE) == 0 {
+			break
+		}
+	}
+
+	// Enable ICache
+	*(*uint32)(unsafe.Pointer(uintptr(EXTMEM_ICACHE_CTRL_REG))) |= EXTMEM_ICACHE_ENABLE
+
+	// Enable DCache
+	*(*uint32)(unsafe.Pointer(uintptr(EXTMEM_DCACHE_CTRL_REG))) |= EXTMEM_DCACHE_ENABLE
+}
+
+// isCacheEnabled checks if both instruction and data caches are enabled
+func isCacheEnabled() bool {
+	icacheCtrl := *(*uint32)(unsafe.Pointer(uintptr(EXTMEM_ICACHE_CTRL_REG)))
+	dcacheCtrl := *(*uint32)(unsafe.Pointer(uintptr(EXTMEM_DCACHE_CTRL_REG)))
+
+	return (icacheCtrl&EXTMEM_ICACHE_ENABLE) != 0 && (dcacheCtrl&EXTMEM_DCACHE_ENABLE) != 0
 }
 
 // resetMMUTable resets the MMU translation table
@@ -118,14 +175,29 @@ func mapFlashRegion(vaddr, paddr uint32, pageCount int) {
 	mmuTable := (*[MMU_ENTRY_COUNT]uint32)(unsafe.Pointer(uintptr(MMU_TABLE_BASE)))
 
 	for i := 0; i < pageCount; i++ {
-		// Calculate MMU entry index from virtual address
-		entryIndex := (vaddr + uint32(i*MMU_PAGE_SIZE) - DROM_VADDR_START) / MMU_PAGE_SIZE
+		currentVaddr := vaddr + uint32(i*MMU_PAGE_SIZE)
+		currentPaddr := paddr + uint32(i*MMU_PAGE_SIZE)
+
+		var entryIndex uint32
+
+		// Calculate MMU entry index based on virtual address space
+		if currentVaddr >= DROM_VADDR_START && currentVaddr < DROM_VADDR_START+32*1024*1024 {
+			// DROM space: 0x3C000000-0x3E000000
+			entryIndex = (currentVaddr - DROM_VADDR_START) / MMU_PAGE_SIZE
+		} else if currentVaddr >= IROM_VADDR_START && currentVaddr < IROM_VADDR_START+32*1024*1024 {
+			// IROM space: 0x42000000-0x44000000
+			// IROM entries start after DROM entries in the MMU table
+			entryIndex = ((currentVaddr - IROM_VADDR_START) / MMU_PAGE_SIZE) + 256
+		} else {
+			continue // Skip invalid virtual addresses
+		}
+
 		if entryIndex >= MMU_ENTRY_COUNT {
 			continue // Skip invalid entries
 		}
 
 		// Calculate physical page number (ESP32-S3 flash mapping)
-		physPageNum := (paddr + uint32(i*MMU_PAGE_SIZE)) / MMU_PAGE_SIZE
+		physPageNum := currentPaddr / MMU_PAGE_SIZE
 
 		// Set MMU entry: physical page number with valid bit
 		mmuTable[entryIndex] = physPageNum | MMU_VALID_BIT
@@ -146,12 +218,18 @@ func debugGPIO(n int) {
 //
 //export main
 func main() {
+	// === EARLY DEBUG ===
+	// First, try to output something to see if we even get here
+	debugGPIO(4) // Turn on GPIO4 as early indicator
+
 	// === BOOTLOADER PHASE ===
 	// Initialize cache and MMU to enable access to flash memory
 	// This replaces the functionality normally provided by ESP-IDF bootloader
 	// Based on ESP-IDF bootloader_utility.c:set_cache_and_start_app()
-	// TODO: ROM bootloader may already initialize cache/MMU, test without this first
-	// initCacheAndMMU()
+
+	// TEMPORARY: Skip cache/MMU init to test if ROM bootloader already did it
+	// ROM bootloader should have already set up basic cache/MMU for us
+	debugGPIO(5) // Indicate we're skipping cache init for now
 
 	// === APPLICATION PHASE ===
 	// This initialization configures the following things:
@@ -190,6 +268,10 @@ func main() {
 
 	clearbss()
 
+	// Initialize GPIO and SPI peripherals early (GPIO matrix might be already initialized by ROM)
+	initGPIOPeripherals()
+	initSPIPeripherals()
+
 	// Initialize UART after USB configuration
 	machine.USBCDC.Configure(machine.UARTConfig{BaudRate: 115200})
 	machine.InitSerial()
@@ -201,11 +283,75 @@ func main() {
 	}
 	print("\n")
 
+	// TEST: Generate 50kHz signal on GPIO36 for debugging
+	// testGPIO36_50kHz()
+
 	// Now use standard run() which will call initHeap() again but it should be safe
 	run()
 
 	// Fallback: if main ever returns, hang the CPU.
 	exit(0)
+}
+
+// initGPIOPeripherals initializes GPIO and IO_MUX peripherals exactly like ESP-IDF
+// Based on ESP-IDF gpio_hal_init and bootloader GPIO initialization
+func initGPIOPeripherals() {
+	// Enable GPIO peripheral clock - needed for GPIO matrix routing
+	esp.GPIO.SetCLOCK_GATE_CLK_EN(1)
+
+	// Also enable GPIO sigma delta clock if needed
+	esp.GPIO_SD.SetSIGMADELTA_CG_CLK_EN(1)
+	esp.GPIO_SD.SetSIGMADELTA_MISC_FUNCTION_CLK_EN(1)
+
+	debugGPIO(7) // Indicate GPIO peripherals initialized
+}
+
+// initSPIPeripherals initializes SPI2 and SPI3 peripherals exactly like ESP-IDF
+// Based on ESP-IDF spi_ll_enable_bus_clock and spi_ll_reset_register
+func initSPIPeripherals() {
+	// SPI2 (FSPI) - exactly like ESP-IDF spi_ll_enable_bus_clock
+	esp.SYSTEM.SetPERIP_CLK_EN0_SPI2_CLK_EN(1) // Enable clock
+	esp.SYSTEM.SetPERIP_RST_EN0_SPI2_RST(1)    // Assert reset
+	esp.SYSTEM.SetPERIP_RST_EN0_SPI2_RST(0)    // Release reset
+
+	// SPI3 (HSPI) - exactly like ESP-IDF spi_ll_enable_bus_clock
+	esp.SYSTEM.SetPERIP_CLK_EN0_SPI3_CLK_EN(1) // Enable clock
+	esp.SYSTEM.SetPERIP_RST_EN0_SPI3_RST(1)    // Assert reset
+	esp.SYSTEM.SetPERIP_RST_EN0_SPI3_RST(0)    // Release reset
+
+	// SPI01 base clock - needed for SPI2/SPI3 operation
+	esp.SYSTEM.SetPERIP_CLK_EN0_SPI01_CLK_EN(1) // Base SPI clock
+
+	// Initialize SPI2 master mode like ESP-IDF spi_ll_master_init
+	initSPI2Master()
+
+	debugGPIO(6) // Indicate SPI peripherals initialized
+}
+
+// initSPI2Master initializes SPI2 in master mode exactly like ESP-IDF spi_ll_master_init
+func initSPI2Master() {
+	bus := esp.SPI2
+
+	// Reset timing - exact ESP-IDF sequence
+	bus.USER1.Set(0) // cs_setup_time = 0, cs_hold_time = 0
+
+	// Use all 64 bytes of the buffer
+	bus.SetUSER_USR_MISO_HIGHPART(0)
+	bus.SetUSER_USR_MOSI_HIGHPART(0)
+
+	// Disable unneeded interrupts
+	bus.SLAVE.Set(0)
+	bus.USER.Set(0)
+
+	// Configure master clock gate - critical for clock generation!
+	bus.SetCLK_GATE_MST_CLK_ACTIVE(1) // Enable master clock
+	bus.SetCLK_GATE_MST_CLK_SEL(1)    // Select master clock
+
+	// Configure DMA
+	bus.DMA_CONF.Set(0)
+	bus.SetDMA_CONF_SLV_TX_SEG_TRANS_CLR_EN(1)
+	bus.SetDMA_CONF_SLV_RX_SEG_TRANS_CLR_EN(1)
+	bus.SetDMA_CONF_DMA_SLV_SEG_TRANS_EN(0)
 }
 
 func abort() {
@@ -223,3 +369,247 @@ var _sbss [0]byte
 
 //go:extern _ebss
 var _ebss [0]byte
+
+// ESP32-S3 GPIO Matrix signal indices - from ESP-IDF gpio_sig_map.h
+// Source: /Users/dimajolkin/esp/esp-idf/components/soc/esp32s3/include/soc/gpio_sig_map.h
+const (
+	// SPI2 (FSPI) signals
+	FSPICLK_OUT_IDX = 101 // Line 186: #define FSPICLK_OUT_IDX 101
+	FSPIQ_OUT_IDX   = 102 // Line 188: #define FSPIQ_OUT_IDX 102 (MISO)
+	FSPID_OUT_IDX   = 103 // Line 190: #define FSPID_OUT_IDX 103 (MOSI)
+
+	// SPI3 signals
+	SPI3_CLK_OUT_IDX = 66 // Line 136: #define SPI3_CLK_OUT_IDX 66
+	SPI3_Q_OUT_IDX   = 67 // Line 138: #define SPI3_Q_OUT_IDX 67 (MISO)
+	SPI3_D_OUT_IDX   = 68 // Line 140: #define SPI3_D_OUT_IDX 68 (MOSI)
+)
+
+// testGPIO36_50kHz - COMPLETE SCK generator test
+func testGPIO36_50kHz() {
+	println("=== COMPLETE SCK GENERATOR TEST ===")
+
+	// TEST 1: Basic GPIO test on pin 12
+	// println("TEST 1: Basic GPIO12 control")
+	// esp.GPIO.ENABLE_W1TS.Set(1 << 12)
+	// for i := 0; i < 5; i++ {
+	// 	esp.GPIO.OUT_W1TS.Set(1 << 12) // HIGH
+	// 	for j := 0; j < 50000; j++ {
+	// 	} // Wait
+	// 	esp.GPIO.OUT_W1TC.Set(1 << 12) // LOW
+	// 	for j := 0; j < 50000; j++ {
+	// 	} // Wait
+	// 	println("GPIO12 toggle", i)
+	// }
+	// println("TEST 1: GPIO12 basic control - DONE (should see 5 toggles)")
+
+	// TEST 2: Arduino-style SPI initialization
+	//testArduinoStyleSPI()
+
+	// TEST 3: Try both SPI2 and SPI3 peripherals
+	testSCKGenerator(esp.SPI2, "SPI2", 2)
+	///testSCKGenerator(esp.SPI3, "SPI3", 3)
+
+	println("=== ALL SCK TESTS COMPLETED ===")
+}
+
+// testArduinoStyleSPI mimics Arduino SPI initialization
+func testArduinoStyleSPI() {
+	println("=== ARDUINO STYLE SPI TEST ===")
+
+	// Use SPI2 (HSPI in Arduino terms)
+	spi := esp.SPI2
+
+	// Enable SPI2 clocks
+	esp.SYSTEM.SetPERIP_CLK_EN0_SPI2_CLK_EN(1)
+	esp.SYSTEM.SetPERIP_RST_EN0_SPI2_RST(1)
+	esp.SYSTEM.SetPERIP_RST_EN0_SPI2_RST(0)
+
+	// Configure GPIO12 as SPI CLK using GPIO matrix (like Arduino)
+	esp.GPIO.ENABLE_W1TS.Set(1 << 12) // Enable GPIO12 output
+
+	// Configure GPIO12 IO MUX - set as GPIO function (not dedicated SPI)
+	gpio12_iomux := (*volatile.Register32)(unsafe.Pointer(uintptr(0x60009048)))
+	gpio12_iomux.Set((gpio12_iomux.Get() & ^uint32(0x7000)) | (2 << 12) | (1 << 8) | (3 << 10)) // GPIO function, pull-up, drive strength 3
+
+	// Route SPI2 CLK signal to GPIO12 through GPIO matrix
+	gpio12_out_func := (*volatile.Register32)(unsafe.Add(unsafe.Pointer(&esp.GPIO.FUNC0_OUT_SEL_CFG), uintptr(12)*4))
+	gpio12_out_func.Set(FSPICLK_OUT_IDX) // SPI2 CLK signal
+
+	println("ARDUINO: GPIO12 configured - IOMUX=", gpio12_iomux.Get(), "OUT_FUNC=", gpio12_out_func.Get())
+
+	// Arduino-style register setup
+	spi.USER.Set(0)
+	spi.USER1.Set(0)
+	spi.CTRL.Set(0)
+	// spi.CTRL1.Set(0) // Not available in this SPI type
+	spi.MISC.Set(0)
+	spi.CLOCK.Set(0)
+	spi.CLK_GATE.Set(0)
+
+	// Enable clocks (Arduino style)
+	spi.SetCLK_GATE_CLK_EN(1)
+	spi.SetCLK_GATE_MST_CLK_ACTIVE(1)
+	spi.SetCLK_GATE_MST_CLK_SEL(1)
+
+	// Master mode configuration
+	spi.SetUSER_USR_MOSI(1)
+	spi.SetUSER_DOUTDIN(1) // Full duplex
+	spi.SetMISC_CK_DIS(0)  // Enable clock output
+
+	// Moderate clock for visibility (not too slow)
+	// APB clock = 80MHz, divider = 8 -> ~10MHz SPI clock
+	divider := uint32(8)
+	spi.SetCLOCK_CLKDIV_PRE(divider - 1)
+	spi.SetCLOCK_CLKCNT_N(divider - 1)
+	spi.SetCLOCK_CLKCNT_H((divider / 2) - 1)
+	spi.SetCLOCK_CLKCNT_L(divider - 1)
+	spi.SetCLOCK_CLK_EQU_SYSCLK(0) // Use divided clock
+
+	println("ARDUINO: SPI2 configured, registers:")
+	println("  USER=", spi.USER.Get())
+	println("  CLK_GATE=", spi.CLK_GATE.Get())
+	println("  CLOCK=", spi.CLOCK.Get())
+	println("  GPIO12 FUNC=", gpio12_out_func.Get())
+
+	// Test transmission
+	for i := 0; i < 10000; i++ {
+		println("ARDUINO: Transmitting byte", i)
+		spi.SetMS_DLEN_MS_DATA_BITLEN(7) // 8 bits
+		spi.W0.Set(0xFF)
+		spi.SetCMD_USR(1)
+
+		// Wait for completion
+		for spi.GetCMD_USR() != 0 {
+			// Wait
+		}
+
+		// Small delay between transmissions
+		for j := 0; j < 50000; j++ {
+		}
+	}
+
+	println("ARDUINO: 20 SPI transmissions completed - check GPIO12!")
+}
+
+// testSCKGenerator tests SCK generation on specific SPI peripheral
+func testSCKGenerator(spi *esp.SPI2_Type, name string, busID int) {
+	println("TEST: SCK generator on", name)
+
+	// Enable peripheral clocks
+	if busID == 2 {
+		esp.SYSTEM.SetPERIP_CLK_EN0_SPI2_CLK_EN(1)
+		esp.SYSTEM.SetPERIP_RST_EN0_SPI2_RST(1)
+		esp.SYSTEM.SetPERIP_RST_EN0_SPI2_RST(0)
+	} else {
+		esp.SYSTEM.SetPERIP_CLK_EN0_SPI3_CLK_EN(1)
+		esp.SYSTEM.SetPERIP_RST_EN0_SPI3_RST(1)
+		esp.SYSTEM.SetPERIP_RST_EN0_SPI3_RST(0)
+	}
+
+	// Configure GPIO12 for this SPI
+	esp.GPIO.ENABLE_W1TS.Set(1 << 12)
+	gpio12_iomux := (*volatile.Register32)(unsafe.Pointer(uintptr(0x60009048)))
+	gpio12_iomux.Set((gpio12_iomux.Get() & ^uint32(0x7000)) | (2 << 12) | (1 << 8) | (3 << 10)) // GPIO function
+
+	// Route SPI CLK signal to GPIO12 through GPIO matrix
+	gpio12_out_func := (*volatile.Register32)(unsafe.Add(unsafe.Pointer(&esp.GPIO.FUNC0_OUT_SEL_CFG), uintptr(12)*4))
+	if busID == 2 {
+		gpio12_out_func.Set(FSPICLK_OUT_IDX) // SPI2 CLK signal
+		println(name, "using SPI2 CLK signal", FSPICLK_OUT_IDX)
+	} else {
+		gpio12_out_func.Set(SPI3_CLK_OUT_IDX) // SPI3 CLK signal
+		println(name, "using SPI3 CLK signal", SPI3_CLK_OUT_IDX)
+	}
+
+	// ESP-IDF STYLE SPI MASTER INITIALIZATION
+	println(name, "ESP-IDF style initialization...")
+
+	// Reset all registers first (like ESP-IDF)
+	spi.USER.Set(0)
+	spi.USER1.Set(0)
+	spi.CTRL.Set(0)
+	spi.MISC.Set(0)
+	spi.CLOCK.Set(0)
+	spi.CLK_GATE.Set(0)
+	spi.DMA_CONF.Set(0)
+	spi.SLAVE.Set(0)
+
+	// CRITICAL: ESP-IDF master clock setup
+	spi.SetCLK_GATE_MST_CLK_ACTIVE(1) // hw->clk_gate.mst_clk_active = 1
+	spi.SetCLK_GATE_MST_CLK_SEL(1)    // hw->clk_gate.mst_clk_sel = 1
+	spi.SetCLK_GATE_CLK_EN(1)         // hw->clk_gate.clk_en = 1
+
+	// DMA configuration (like ESP-IDF) - simplified
+	spi.DMA_CONF.Set(0) // Reset DMA config
+
+	// Buffer configuration
+	spi.SetUSER_USR_MISO_HIGHPART(0)
+	spi.SetUSER_USR_MOSI_HIGHPART(0)
+
+	// Enable MOSI and clock output (like ESP-IDF)
+	spi.SetUSER_USR_MOSI(1) // Enable MOSI phase
+	spi.SetMISC_CK_DIS(0)   // Enable CLK output - CRITICAL!
+
+	// ESP-IDF style clock configuration for 50kHz
+	// APB clock is 80MHz, need very slow divider
+	divider := uint32(63) // Maximum divider for slowest clock
+	spi.SetCLOCK_CLKDIV_PRE(divider - 1)
+	spi.SetCLOCK_CLKCNT_N(divider - 1)
+	spi.SetCLOCK_CLKCNT_H((divider / 2) - 1)
+	spi.SetCLOCK_CLKCNT_L(divider - 1)
+	spi.SetCLOCK_CLK_EQU_SYSCLK(0) // Use divided clock
+
+	// CRITICAL: Apply configuration (like ESP-IDF spi_ll_apply_config)
+	spi.SetCMD_UPDATE(1)
+	for spi.GetCMD_UPDATE() != 0 {
+		// Wait for config to be applied
+	}
+	println(name, "configuration applied")
+
+	println(name, "registers: USER=", spi.USER.Get(), "CLK_GATE=", spi.CLK_GATE.Get(), "CLOCK=", spi.CLOCK.Get())
+
+	// ESP-IDF style transmission
+	println(name, "starting ESP-IDF style transmission...")
+
+	// Set data length and data
+	spi.SetMS_DLEN_MS_DATA_BITLEN(7) // 8 bits - 1
+	spi.W0.Set(0xFF)
+
+	// Clear interrupt flags (like ESP-IDF)
+	spi.SetDMA_INT_CLR_TRANS_DONE_INT_CLR(1)
+
+	// Apply configuration before transmission
+	spi.SetCMD_UPDATE(1)
+	for spi.GetCMD_UPDATE() != 0 {
+		// Wait for update
+	}
+
+	// Start user transaction (like ESP-IDF spi_ll_user_start)
+	spi.SetCMD_USR(1)
+
+	// Wait for transmission (like ESP-IDF spi_ll_usr_is_done)
+	timeout := 0
+	for spi.GetDMA_INT_RAW_TRANS_DONE_INT_RAW() == 0 && timeout < 100000 {
+		timeout++
+	}
+
+	println(name, "transmission completed in", timeout, "cycles, TRANS_DONE=", spi.GetDMA_INT_RAW_TRANS_DONE_INT_RAW())
+
+	if timeout > 0 {
+		println(name, "SCK SHOULD BE ACTIVE - check GPIO12 now!")
+		// Keep transmitting for oscilloscope measurement
+		for {
+			spi.SetMS_DLEN_MS_DATA_BITLEN(7)
+			spi.W0.Set(0xFF)
+			spi.SetCMD_USR(1)
+			for spi.GetCMD_USR() != 0 {
+			}
+			// Small delay between transmissions
+			for j := 0; j < 10000; j++ {
+			}
+		}
+		println(name, "10 transmissions completed - SCK should be visible")
+	} else {
+		println(name, "ERROR: Transmission too fast (0 cycles) - no SCK generated")
+	}
+}
