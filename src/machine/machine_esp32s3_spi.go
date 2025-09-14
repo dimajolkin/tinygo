@@ -33,7 +33,7 @@ const (
 	SPI2_CS0_OUT_IDX = uint32(110) // FSPICS0_OUT_IDX
 
 	// SPI3 (HSPI) signals - Hardware SPI3 - CORRECTED from ESP-IDF gpio_sig_map.h
-	// Source: /Users/dimajolkin/esp/esp-idf/components/soc/esp32s3/include/soc/gpio_sig_map.h
+	// Source: /esp-idf/components/soc/esp32s3/include/soc/gpio_sig_map.h
 	SPI3_CLK_OUT_IDX = uint32(66) // Line 136: SPI3_CLK_OUT_IDX
 	SPI3_CLK_IN_IDX  = uint32(66) // Line 135: SPI3_CLK_IN_IDX
 	SPI3_Q_OUT_IDX   = uint32(67) // Line 138: SPI3_Q_OUT_IDX (MISO)

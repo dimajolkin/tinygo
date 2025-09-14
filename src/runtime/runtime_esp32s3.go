@@ -371,7 +371,7 @@ var _sbss [0]byte
 var _ebss [0]byte
 
 // ESP32-S3 GPIO Matrix signal indices - from ESP-IDF gpio_sig_map.h
-// Source: /Users/dimajolkin/esp/esp-idf/components/soc/esp32s3/include/soc/gpio_sig_map.h
+// Source: /esp-idf/components/soc/esp32s3/include/soc/gpio_sig_map.h
 const (
 	// SPI2 (FSPI) signals
 	FSPICLK_OUT_IDX = 101 // Line 186: #define FSPICLK_OUT_IDX 101
