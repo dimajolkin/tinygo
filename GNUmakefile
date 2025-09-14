@@ -111,7 +111,7 @@ ifneq ($(CROSS),)
     endif
 endif
 
-.PHONY: all tinygo tinygo-esp test $(LLVM_BUILDDIR) llvm-source llvm-esp-source llvm-esp-build clean fmt gen-device gen-device-nrf gen-device-nxp gen-device-avr gen-device-rp
+.PHONY: all tinygo test $(LLVM_BUILDDIR) llvm-source clean fmt gen-device gen-device-nrf gen-device-nxp gen-device-avr gen-device-rp
 
 LLVM_COMPONENTS = all-targets analysis asmparser asmprinter bitreader bitwriter codegen core coroutines coverage debuginfodwarf debuginfopdb executionengine frontenddriver frontendhlsl frontendopenmp instrumentation interpreter ipo irreader libdriver linker lto mc mcjit objcarcopts option profiledata scalaropts support target windowsdriver windowsmanifest
 
@@ -246,23 +246,6 @@ $(LLVM_PROJECTDIR)/llvm:
 	git clone -b esp-19.1.2_20250312 --depth=1 https://github.com/espressif/llvm-project $(LLVM_PROJECTDIR)
 llvm-source: $(LLVM_PROJECTDIR)/llvm ## Get LLVM sources
 
-# ESP-specific LLVM build targets
-LLVM_ESP_BUILDDIR ?= llvm-esp-build
-LLVM_ESP_PROJECTDIR ?= llvm-esp-project
-
-$(LLVM_ESP_PROJECTDIR)/llvm:
-	git clone -b esp-19.1.2_20250312 --depth=1 https://github.com/espressif/llvm-project $(LLVM_ESP_PROJECTDIR)
-llvm-esp-source: $(LLVM_ESP_PROJECTDIR)/llvm ## Get ESP LLVM sources
-
-# Configure ESP LLVM.
-$(LLVM_ESP_BUILDDIR)/build.ninja:
-	mkdir -p $(LLVM_ESP_BUILDDIR) && cd $(LLVM_ESP_BUILDDIR) && cmake -G Ninja $(TINYGO_SOURCE_DIR)/$(LLVM_ESP_PROJECTDIR)/llvm "-DLLVM_TARGETS_TO_BUILD=X86;ARM;AArch64;AVR;Mips;RISCV;WebAssembly" "-DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD=Xtensa" -DCMAKE_BUILD_TYPE=Release -DLIBCLANG_BUILD_STATIC=ON -DLLVM_ENABLE_TERMINFO=OFF -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_LIBEDIT=OFF -DLLVM_ENABLE_Z3_SOLVER=OFF -DLLVM_ENABLE_OCAMLDOC=OFF -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_PROJECTS="clang;lld" -DLLVM_TOOL_CLANG_TOOLS_EXTRA_BUILD=OFF -DCLANG_ENABLE_STATIC_ANALYZER=OFF -DCLANG_ENABLE_ARCMT=OFF $(LLVM_OPTION)
-
-$(LLVM_ESP_BUILDDIR): $(LLVM_ESP_BUILDDIR)/build.ninja ## Build ESP LLVM
-	cd $(LLVM_ESP_BUILDDIR) && ninja $(NINJA_BUILD_TARGETS)
-
-llvm-esp-build: $(LLVM_ESP_BUILDDIR) ## Build ESP LLVM (alias)
-
 # Configure LLVM.
 TINYGO_SOURCE_DIR=$(shell pwd)
 $(LLVM_BUILDDIR)/build.ninja:
@@ -308,10 +291,6 @@ check-nodejs-version:
 tinygo: ## Build the TinyGo compiler
 	@if [ ! -f "$(LLVM_BUILDDIR)/bin/llvm-config" ]; then echo "Fetch and build LLVM first by running:"; echo "  $(MAKE) llvm-source"; echo "  $(MAKE) $(LLVM_BUILDDIR)"; exit 1; fi
 	CGO_CPPFLAGS="$(CGO_CPPFLAGS)" CGO_CXXFLAGS="$(CGO_CXXFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" $(GOENVFLAGS) $(GO) build -buildmode exe -o build/tinygo$(EXE) -tags "byollvm osusergo" .
-
-tinygo-esp: ## Build the TinyGo compiler with ESP LLVM
-	@if [ ! -f "$(LLVM_ESP_BUILDDIR)/bin/llvm-config" ]; then echo "Fetch and build ESP LLVM first by running:"; echo "  $(MAKE) llvm-esp-source"; echo "  $(MAKE) llvm-esp-build"; exit 1; fi
-	CGO_CPPFLAGS="$(shell $(LLVM_CONFIG_PREFIX) $(LLVM_ESP_BUILDDIR)/bin/llvm-config --cppflags) -I$(abspath $(LLVM_ESP_BUILDDIR))/tools/clang/include -I$(abspath $(LLVM_ESP_PROJECTDIR))/clang/include -I$(abspath $(LLVM_ESP_PROJECTDIR))/lld/include" CGO_CXXFLAGS="-std=c++17" CGO_LDFLAGS="-L$(abspath $(LLVM_ESP_BUILDDIR)/lib) -lclang $(CLANG_LIBS) $(LLD_LIBS) $(shell $(LLVM_CONFIG_PREFIX) $(LLVM_ESP_BUILDDIR)/bin/llvm-config --ldflags --libs --system-libs $(LLVM_COMPONENTS)) -lstdc++ $(CGO_LDFLAGS_EXTRA)" $(GOENVFLAGS) $(GO) build -buildmode exe -o build/tinygo-esp$(EXE) -tags "byollvm osusergo" .
 test: check-nodejs-version
 	CGO_CPPFLAGS="$(CGO_CPPFLAGS)" CGO_CXXFLAGS="$(CGO_CXXFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" $(GO) test $(GOTESTFLAGS) -timeout=1h -buildmode exe -tags "byollvm osusergo" $(GOTESTPKGS)
 

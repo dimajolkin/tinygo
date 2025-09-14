@@ -1,35 +1,5 @@
 # TinyGo - Go compiler for small places
 
-## ESP32/ESP8266 Support with Xtensa Architecture
-
-TinyGo supports ESP32/ESP8266 development using the Espressif LLVM fork with Xtensa architecture support.
-
-### Building TinyGo with ESP LLVM
-
-```bash
-# Download ESP LLVM sources (Espressif fork with Xtensa support)
-make llvm-esp-source
-
-# Build ESP LLVM
-make llvm-esp-build
-
-# Build TinyGo with ESP LLVM
-make tinygo-esp
-```
-
-### Using TinyGo with ESP support
-
-```bash
-# Check version (should show "ESP" variant)
-./build/tinygo-esp version
-
-# Build for ESP32S3
-./build/tinygo-esp build -target=esp32s3 -o firmware.bin ./your-project
-
-# Available ESP targets: esp32, esp32s3, esp32c3, esp8266, and more
-./build/tinygo-esp targets | grep esp
-```
-
 [![Linux](https://github.com/tinygo-org/tinygo/actions/workflows/linux.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/linux.yml) [![macOS](https://github.com/tinygo-org/tinygo/actions/workflows/build-macos.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/build-macos.yml) [![Windows](https://github.com/tinygo-org/tinygo/actions/workflows/windows.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/windows.yml) [![Docker](https://github.com/tinygo-org/tinygo/actions/workflows/docker.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/docker.yml) [![Nix](https://github.com/tinygo-org/tinygo/actions/workflows/nix.yml/badge.svg?branch=dev)](https://github.com/tinygo-org/tinygo/actions/workflows/nix.yml) [![CircleCI](https://circleci.com/gh/tinygo-org/tinygo/tree/dev.svg?style=svg)](https://circleci.com/gh/tinygo-org/tinygo/tree/dev)
 
 TinyGo is a Go compiler intended for use in small places such as microcontrollers, WebAssembly (wasm/wasi), and command-line tools.

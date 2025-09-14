@@ -80,12 +80,6 @@ func (p Pin) Configure(config PinConfig) {
 	p.configure(config, 256)
 }
 
-// ConfigureForPeripheral configures this pin for peripheral use with a specific signal.
-// This is used by SPI, I2C, UART etc to route peripheral signals through GPIO matrix.
-func (p Pin) ConfigureForPeripheral(config PinConfig, signal uint32) {
-	p.configure(config, signal)
-}
-
 // configure is the same as Configure, but allows for setting a specific input
 // or output signal for peripheral use (SPI, I2C, etc).
 // Signals are routed through the GPIO matrix. Output signals use FUNCx_OUT_SEL_CFG,
@@ -99,23 +93,20 @@ func (p Pin) configure(config PinConfig, signal uint32) {
 	var muxConfig uint32
 
 	// Configure IO_MUX register for this pin
-	const function = 2          // Function 2 = GPIO mode for ESP32-S3 (like working test)
+	const function = 1          // Function 1 = GPIO mode for ESP32-S3
 	muxConfig |= function << 12 // MCU_SEL field (bits 14:12)
 
 	// Enable input path (required even for output pins for reading back state)
-	muxConfig |= 1 << 8 // FUN_IE bit (Input Enable) - bit 8 like in working test
+	muxConfig |= 1 << 9 // FUN_IE bit (Input Enable)
 
-	// Set drive strength (affects output current capability) - use max like working test
-	muxConfig |= 3 << 10 // FUN_DRV field (bits 11:10): 0=5mA, 1=10mA, 2=20mA, 3=40mA
+	// Set drive strength (affects output current capability)
+	muxConfig |= 2 << 10 // FUN_DRV field (bits 11:10): 0=5mA, 1=10mA, 2=20mA, 3=40mA
 
 	// Configure pull resistors
 	if config.Mode == PinInputPullup {
 		muxConfig |= 1 << 7 // FUN_WPU bit (Weak Pull Up)
 	} else if config.Mode == PinInputPulldown {
 		muxConfig |= 1 << 8 // FUN_WPD bit (Weak Pull Down)
-	} else if config.Mode == PinOutput {
-		// Enable pull-up for output pins like in working test
-		muxConfig |= 1 << 7 // FUN_WPU bit (Weak Pull Up)
 	}
 
 	// Apply IO_MUX configuration to the pin's pad
