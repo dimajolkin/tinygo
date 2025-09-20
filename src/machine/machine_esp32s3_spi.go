@@ -10,8 +10,6 @@ package machine
 import (
 	"device/esp"
 	"errors"
-	"runtime/volatile"
-	"unsafe"
 )
 
 const (
@@ -95,11 +93,29 @@ func (spi *SPI) Configure(config SPIConfig) error {
 		return ErrInvalidSPIBus
 	}
 
-	// Configure GPIO pins using GPIO Matrix routing
-	// Note: We use GPIO Matrix instead of IO MUX for flexibility
+	// Configure SDI (MISO) pin
+	if config.SDI != NoPin {
+		config.SDI.Configure(PinConfig{Mode: PinInput})
+		inFunc(misoInIdx).Set(esp.GPIO_FUNC_IN_SEL_CFG_SEL | uint32(config.SDI))
+	}
 
-	// Configure GPIO pins using GPIO Matrix routing
-	configureSPIGPIOMatrix(config, sckOutIdx, mosiOutIdx, misoInIdx, csOutIdx)
+	// Configure SDO (MOSI) pin
+	if config.SDO != NoPin {
+		config.SDO.Configure(PinConfig{Mode: PinOutput})
+		config.SDO.outFunc().Set(mosiOutIdx)
+	}
+
+	// Configure SCK (Clock) pin
+	if config.SCK != NoPin {
+		config.SCK.Configure(PinConfig{Mode: PinOutput})
+		config.SCK.outFunc().Set(sckOutIdx)
+	}
+
+	// Configure CS (Chip Select) pin
+	if config.CS != NoPin {
+		config.CS.Configure(PinConfig{Mode: PinOutput})
+		config.CS.outFunc().Set(csOutIdx)
+	}
 
 	// Enable peripheral clock and reset
 	// Without bootloader, we need to be more explicit about clock initialization
@@ -292,64 +308,4 @@ func (spi *SPI) Tx(w, r []byte) error {
 	}
 
 	return nil
-}
-
-// configureSPIGPIOMatrix configures SPI pins using GPIO Matrix routing
-// This provides more flexibility than IO MUX and is required for proper signal routing
-func configureSPIGPIOMatrix(config SPIConfig, sckOutIdx, mosiOutIdx, misoInIdx, csOutIdx uint32) {
-	// Configure SCK (Clock) pin
-	if config.SCK != NoPin {
-		configurePinForSPI(config.SCK, sckOutIdx, PinOutput)
-	}
-
-	// Configure SDO (MOSI) pin
-	if config.SDO != NoPin {
-		configurePinForSPI(config.SDO, mosiOutIdx, PinOutput)
-	}
-
-	// Configure SDI (MISO) pin
-	if config.SDI != NoPin {
-		configurePinForSPI(config.SDI, misoInIdx, PinInput)
-		// Configure input routing for MISO
-		inFunc(misoInIdx).Set(esp.GPIO_FUNC_IN_SEL_CFG_SEL | uint32(config.SDI))
-	}
-
-	// Configure CS (Chip Select) pin
-	if config.CS != NoPin {
-		configurePinForSPI(config.CS, csOutIdx, PinOutput)
-	}
-}
-
-// configurePinForSPI configures a single pin for SPI using direct GPIO matrix setup
-// This ensures proper signal routing that works reliably
-func configurePinForSPI(pin Pin, signal uint32, mode PinMode) {
-	if pin == NoPin {
-		return
-	}
-
-	pinNum := uint32(pin)
-
-	// Enable GPIO output/input
-	if mode == PinOutput {
-		esp.GPIO.ENABLE_W1TS.Set(1 << pinNum)
-	}
-
-	// Configure IO MUX for GPIO function (not dedicated peripheral function)
-	// This allows GPIO Matrix to control the pin
-	// Use the same address calculation as in working test
-	// Working test used 0x60009048 for GPIO12, so: 0x60009048 - 12*4 = 0x60009018
-	iomuxAddr := uintptr(0x60009018 + pinNum*4) // Base address that gives 0x60009048 for GPIO12
-	iomux := (*volatile.Register32)(unsafe.Pointer(iomuxAddr))
-
-	// Configure: function=2 (GPIO), input_enable=1, drive_strength=3, pull_up=1
-	muxConfig := (iomux.Get() & ^uint32(0x7000)) | (2 << 12) | (1 << 8) | (3 << 10)
-	if mode == PinOutput {
-		muxConfig |= 1 << 7 // Enable pull-up for output pins
-	}
-	iomux.Set(muxConfig)
-
-	// Route signal through GPIO Matrix
-	outFuncAddr := unsafe.Add(unsafe.Pointer(&esp.GPIO.FUNC0_OUT_SEL_CFG), uintptr(pinNum)*4)
-	outFunc := (*volatile.Register32)(outFuncAddr)
-	outFunc.Set(signal)
 }
