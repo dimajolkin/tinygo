@@ -22,6 +22,24 @@ const (
 	pplClockFreq = 80e6
 )
 
+// ESP32-S3 default SPI pins that support IO MUX direct connection
+const (
+	// SPI2 (FSPI) default pins - support IO MUX function 4
+	SPI2_DEFAULT_SCK  = GPIO12 // SCK
+	SPI2_DEFAULT_MOSI = GPIO11 // SDO (MOSI)
+	SPI2_DEFAULT_MISO = GPIO13 // SDI (MISO)
+	SPI2_DEFAULT_CS   = GPIO10 // CS
+
+	// SPI3 (HSPI) default pins - support IO MUX function 4
+	SPI3_DEFAULT_SCK  = GPIO36 // SCK
+	SPI3_DEFAULT_MOSI = GPIO35 // SDO (MOSI)
+	SPI3_DEFAULT_MISO = GPIO37 // SDI (MISO)
+	SPI3_DEFAULT_CS   = GPIO34 // CS
+
+	// IO MUX function number for SPI direct connection
+	SPI_IOMUX_FUNC = IOMUX_FUNC_SPI
+)
+
 // ESP32-S3 GPIO Matrix signal indices for SPI - CORRECTED from ESP-IDF gpio_sig_map.h
 const (
 	// SPI2 (FSPI) signals - Hardware SPI2 - CORRECT VALUES from ESP-IDF
@@ -47,54 +65,6 @@ const (
 var (
 	ErrInvalidSPIBus = errors.New("machine: SPI bus is invalid")
 )
-
-// Compute the SPI bus frequency from the CPU frequency.
-// Ported from ESP32-C3 implementation for better accuracy.
-func freqToClockDiv(hz uint32) uint32 {
-	fcpu := CPUFrequency()
-	if hz >= fcpu { // maximum frequency
-		return 1 << 31
-	}
-	if hz < (fcpu / (16 * 64)) { // minimum frequency
-		return 15<<18 | 63<<12 | 31<<6 | 63 // pre=15, n=63
-	}
-
-	// iterate looking for an exact match
-	// or iterate all 16 prescaler options
-	// looking for the smallest error
-	var bestPre, bestN, bestErr uint32
-	bestN = 1
-	bestErr = 0xffffffff
-	q := uint32(float32(pplClockFreq)/float32(hz) + float32(0.5))
-	for p := uint32(0); p < 16; p++ {
-		n := q/(p+1) - 1
-		if n < 1 { // prescaler became too large, stop enum
-			break
-		}
-		if n > 63 { // prescaler too small, skip to next
-			continue
-		}
-
-		freq := fcpu / ((p + 1) * (n + 1))
-		if freq == hz { // exact match
-			return p<<18 | n<<12 | (n/2)<<6 | n
-		}
-
-		var err uint32
-		if freq < hz {
-			err = hz - freq
-		} else {
-			err = freq - hz
-		}
-		if err < bestErr {
-			bestErr = err
-			bestPre = p
-			bestN = n
-		}
-	}
-
-	return bestPre<<18 | bestN<<12 | (bestN/2)<<6 | bestN
-}
 
 // Serial Peripheral Interface on the ESP32-S3.
 type SPI struct {
@@ -144,28 +114,47 @@ func (spi *SPI) Configure(config SPIConfig) error {
 		return ErrInvalidSPIBus
 	}
 
-	// Configure SDI (MISO) pin
-	if config.SDI != NoPin {
-		config.SDI.Configure(PinConfig{Mode: PinInput})
-		inFunc(misoInIdx).Set(esp.GPIO_FUNC_IN_SEL_CFG_SEL | uint32(config.SDI))
-	}
+	// Check if we can use IO MUX direct connection for better performance
+	if isDefaultSPIPins(spi.busID, config) {
+		// Use IO MUX direct connection - better signal quality and performance
+		// Configure pins using IO MUX direct connection (SPI function)
+		if config.SCK != NoPin {
+			config.SCK.configure(PinConfig{Mode: PinOutput}, SPI_IOMUX_FUNC, 0)
+		}
+		if config.SDO != NoPin {
+			config.SDO.configure(PinConfig{Mode: PinOutput}, SPI_IOMUX_FUNC, 0)
+		}
+		if config.SDI != NoPin {
+			config.SDI.configure(PinConfig{Mode: PinInput}, SPI_IOMUX_FUNC, 0)
+		}
+		if config.CS != NoPin {
+			config.CS.configure(PinConfig{Mode: PinOutput}, SPI_IOMUX_FUNC, 0)
+		}
+	} else {
+		// Use GPIO Matrix routing - more flexible but slightly slower
+		// Configure SDI (MISO) pin
+		if config.SDI != NoPin {
+			config.SDI.Configure(PinConfig{Mode: PinInput})
+			inFunc(misoInIdx).Set(esp.GPIO_FUNC_IN_SEL_CFG_SEL | uint32(config.SDI))
+		}
 
-	// Configure SDO (MOSI) pin
-	if config.SDO != NoPin {
-		config.SDO.Configure(PinConfig{Mode: PinOutput})
-		config.SDO.outFunc().Set(mosiOutIdx)
-	}
+		// Configure SDO (MOSI) pin
+		if config.SDO != NoPin {
+			config.SDO.Configure(PinConfig{Mode: PinOutput})
+			config.SDO.outFunc().Set(mosiOutIdx)
+		}
 
-	// Configure SCK (Clock) pin
-	if config.SCK != NoPin {
-		config.SCK.Configure(PinConfig{Mode: PinOutput})
-		config.SCK.outFunc().Set(sckOutIdx)
-	}
+		// Configure SCK (Clock) pin
+		if config.SCK != NoPin {
+			config.SCK.Configure(PinConfig{Mode: PinOutput})
+			config.SCK.outFunc().Set(sckOutIdx)
+		}
 
-	// Configure CS (Chip Select) pin
-	if config.CS != NoPin {
-		config.CS.Configure(PinConfig{Mode: PinOutput})
-		config.CS.outFunc().Set(csOutIdx)
+		// Configure CS (Chip Select) pin
+		if config.CS != NoPin {
+			config.CS.Configure(PinConfig{Mode: PinOutput})
+			config.CS.outFunc().Set(csOutIdx)
+		}
 	}
 
 	// Enable peripheral clock and reset
@@ -322,4 +311,71 @@ func (spi *SPI) Tx(w, r []byte) error {
 	}
 
 	return nil
+}
+
+// Compute the SPI bus frequency from the CPU frequency.
+// Ported from ESP32-C3 implementation for better accuracy.
+func freqToClockDiv(hz uint32) uint32 {
+	fcpu := CPUFrequency()
+	if hz >= fcpu { // maximum frequency
+		return 1 << 31
+	}
+	if hz < (fcpu / (16 * 64)) { // minimum frequency
+		return 15<<18 | 63<<12 | 31<<6 | 63 // pre=15, n=63
+	}
+
+	// iterate looking for an exact match
+	// or iterate all 16 prescaler options
+	// looking for the smallest error
+	var bestPre, bestN, bestErr uint32
+	bestN = 1
+	bestErr = 0xffffffff
+	q := uint32(float32(pplClockFreq)/float32(hz) + float32(0.5))
+	for p := uint32(0); p < 16; p++ {
+		n := q/(p+1) - 1
+		if n < 1 { // prescaler became too large, stop enum
+			break
+		}
+		if n > 63 { // prescaler too small, skip to next
+			continue
+		}
+
+		freq := fcpu / ((p + 1) * (n + 1))
+		if freq == hz { // exact match
+			return p<<18 | n<<12 | (n/2)<<6 | n
+		}
+
+		var err uint32
+		if freq < hz {
+			err = hz - freq
+		} else {
+			err = freq - hz
+		}
+		if err < bestErr {
+			bestErr = err
+			bestPre = p
+			bestN = n
+		}
+	}
+
+	return bestPre<<18 | bestN<<12 | (bestN/2)<<6 | bestN
+}
+
+// isDefaultSPIPins checks if the given pins match the default SPI pin configuration
+// that supports IO MUX direct connection for better performance
+func isDefaultSPIPins(busID uint8, config SPIConfig) bool {
+	switch busID {
+	case 2: // SPI2 (FSPI)
+		return config.SCK == SPI2_DEFAULT_SCK &&
+			config.SDO == SPI2_DEFAULT_MOSI &&
+			config.SDI == SPI2_DEFAULT_MISO &&
+			(config.CS == SPI2_DEFAULT_CS || config.CS == NoPin)
+	case 3: // SPI3 (HSPI)
+		return config.SCK == SPI3_DEFAULT_SCK &&
+			config.SDO == SPI3_DEFAULT_MOSI &&
+			config.SDI == SPI3_DEFAULT_MISO &&
+			(config.CS == SPI3_DEFAULT_CS || config.CS == NoPin)
+	default:
+		return false
+	}
 }

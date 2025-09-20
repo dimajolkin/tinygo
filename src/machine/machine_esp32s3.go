@@ -15,6 +15,14 @@ const peripheralClock = 40_000000 // 80MHz
 // GPIO Matrix output signal value for simple GPIO mode
 const GPIO_FUNC_OUT_SEL_SIMPLE_GPIO = 256
 
+// IO MUX function constants for ESP32-S3
+const (
+	IOMUX_FUNC_GPIO = 1 // GPIO mode (default)
+	IOMUX_FUNC_UART = 2 // UART direct connection
+	IOMUX_FUNC_I2C  = 3 // I2C direct connection
+	IOMUX_FUNC_SPI  = 4 // SPI direct connection
+)
+
 // CPUFrequency returns the current CPU frequency of the chip.
 // Currently it is a fixed frequency but it may allow changing in the future.
 func CPUFrequency() uint32 {
@@ -76,6 +84,13 @@ const (
 
 // Configure this pin with the given configuration.
 func (p Pin) Configure(config PinConfig) {
+	// Use GPIO mode and simple GPIO output signal
+	p.configure(config, IOMUX_FUNC_GPIO, GPIO_FUNC_OUT_SEL_SIMPLE_GPIO)
+}
+
+// configure is the same as Configure, but allows for setting a specific IO MUX function
+// and output signal. This enables both GPIO Matrix routing and IO MUX direct connections.
+func (p Pin) configure(config PinConfig, iomuxFunc uint32, signal uint32) {
 	if p == NoPin {
 		// NoPin simplifies peripheral configuration - just skip
 		return
@@ -84,15 +99,18 @@ func (p Pin) Configure(config PinConfig) {
 	var muxConfig uint32
 
 	// Configure IO_MUX register for this pin
-	const function = 1 // Function 1 = GPIO mode for ESP32-S3
-	muxConfig |= function << esp.IO_MUX_GPIO_MCU_SEL_Pos
+	muxConfig |= iomuxFunc << esp.IO_MUX_GPIO_MCU_SEL_Pos
 
 	// Enable input path (required even for output pins for reading back state)
 	muxConfig |= esp.IO_MUX_GPIO_FUN_IE
 
 	// Set drive strength (affects output current capability)
-	// 0=5mA, 1=10mA, 2=20mA, 3=40mA - use moderate strength (2) as default
-	muxConfig |= 2 << esp.IO_MUX_GPIO_FUN_DRV_Pos
+	// For SPI pins, use maximum drive strength (3) for better signal quality
+	driveStrength := uint32(2)       // Default: moderate strength (2)
+	if iomuxFunc == IOMUX_FUNC_SPI { // SPI function
+		driveStrength = 3 // Maximum strength for SPI
+	}
+	muxConfig |= driveStrength << esp.IO_MUX_GPIO_FUN_DRV_Pos
 
 	// Configure pull resistors
 	if config.Mode == PinInputPullup {
@@ -104,9 +122,6 @@ func (p Pin) Configure(config PinConfig) {
 	// Apply IO_MUX configuration to the pin's pad
 	p.mux().Set(muxConfig)
 
-	// Set the output signal to the simple GPIO output
-	p.outFunc().Set(GPIO_FUNC_OUT_SEL_SIMPLE_GPIO)
-
 	// Set output enable based on pin mode
 	switch config.Mode {
 	case PinOutput:
@@ -116,6 +131,12 @@ func (p Pin) Configure(config PinConfig) {
 		} else {
 			esp.GPIO.ENABLE1_W1TS.Set(1 << (p - 32))
 		}
+		// Set the output signal (GPIO Matrix or IO MUX bypass)
+		if iomuxFunc == IOMUX_FUNC_GPIO { // GPIO mode - use GPIO Matrix
+			p.outFunc().Set(signal)
+		}
+		// For IO MUX direct connection (iomuxFunc != IOMUX_FUNC_GPIO), we don't set outFunc
+		// because the signal goes directly through IO MUX
 	case PinInput, PinInputPullup, PinInputPulldown:
 		// Disable output driver for input modes
 		if p < 32 {
