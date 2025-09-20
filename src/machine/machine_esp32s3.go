@@ -74,17 +74,6 @@ const (
 
 // Configure this pin with the given configuration.
 func (p Pin) Configure(config PinConfig) {
-	// Output function 256 is a special value reserved for use as a regular GPIO
-	// pin. Peripherals (SPI etc) can set a custom output function by calling
-	// lowercase configure() instead with a signal name.
-	p.configure(config, 256)
-}
-
-// configure is the same as Configure, but allows for setting a specific input
-// or output signal for peripheral use (SPI, I2C, etc).
-// Signals are routed through the GPIO matrix. Output signals use FUNCx_OUT_SEL_CFG,
-// input signals use FUNCy_IN_SEL_CFG registers.
-func (p Pin) configure(config PinConfig, signal uint32) {
 	if p == NoPin {
 		// NoPin simplifies peripheral configuration - just skip
 		return
@@ -112,14 +101,8 @@ func (p Pin) configure(config PinConfig, signal uint32) {
 	// Apply IO_MUX configuration to the pin's pad
 	p.mux().Set(muxConfig)
 
-	// Configure GPIO matrix routing
-	if signal == 256 {
-		// Special value 256 = simple GPIO mode, bypass matrix for better performance
-		p.outFunc().Set(256)
-	} else {
-		// Route specific peripheral signal through this pin
-		p.outFunc().Set(signal)
-	}
+	// Set the output signal to the simple GPIO output (256 = simple GPIO mode).
+	p.outFunc().Set(256)
 
 	// Set output enable based on pin mode
 	switch config.Mode {
