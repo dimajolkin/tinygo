@@ -10,6 +10,8 @@ package machine
 import (
 	"device/esp"
 	"errors"
+	"runtime/volatile"
+	"unsafe"
 )
 
 const (
@@ -20,6 +22,9 @@ const (
 
 	// ESP32-S3 PLL clock frequency (same as ESP32-C3)
 	pplClockFreq = 80e6
+
+	// Default SPI frequency - maximum safe speed
+	SPI_DEFAULT_FREQUENCY = 80e6 // 80MHz
 )
 
 // ESP32-S3 default SPI pins that support IO MUX direct connection
@@ -94,7 +99,7 @@ func (spi *SPI) Configure(config SPIConfig) error {
 
 	// Set default frequency if not specified
 	if config.Frequency == 0 {
-		config.Frequency = 1000000 // Default to 1MHz
+		config.Frequency = SPI_DEFAULT_FREQUENCY // Default to maximum safe speed
 	}
 
 	// Get GPIO Matrix signal indices for this SPI bus
@@ -284,30 +289,96 @@ func (spi *SPI) Transfer(w byte) (byte, error) {
 	return result, nil
 }
 
-// Tx handles read/write operation for SPI interface.
-// Simple implementation using ESP-IDF HAL approach - byte by byte for now
+// Tx handles read/write operation for SPI interface. Since SPI is a synchronous write/read
+// interface, there must always be the same number of bytes written as bytes read.
+// This is accomplished by sending zero bits if r is bigger than w or discarding
+// the incoming data if w is bigger than r.
+// Optimized implementation ported from ESP32-C3 for better performance.
 func (spi *SPI) Tx(w, r []byte) error {
-	// For simplicity, process byte by byte using Transfer
-	// This is not efficient but correct and simple
-	maxLen := len(w)
-	if len(r) > maxLen {
-		maxLen = len(r)
+	toTransfer := len(w)
+	if len(r) > toTransfer {
+		toTransfer = len(r)
 	}
 
-	for i := 0; i < maxLen; i++ {
-		var writeByte byte = 0
-		if i < len(w) {
-			writeByte = w[i]
+	// Get bus handle - both SPI2 and SPI3 use SPI2_Type
+	bus, ok := spi.Bus.(*esp.SPI2_Type)
+	if !ok {
+		return ErrInvalidSPIBus
+	}
+
+	for toTransfer > 0 {
+		// Chunk 64 bytes at a time.
+		chunkSize := toTransfer
+		if chunkSize > 64 {
+			chunkSize = 64
 		}
 
-		readByte, err := spi.Transfer(writeByte)
-		if err != nil {
-			return err
+		// Fill tx buffer.
+		transferWords := (*[16]volatile.Register32)(unsafe.Add(unsafe.Pointer(&bus.W0), 0))
+		if len(w) >= 64 {
+			// We can fill the entire 64-byte transfer buffer with data.
+			// This loop is slightly faster than the loop below.
+			for i := 0; i < 16; i++ {
+				word := uint32(w[i*4]) | uint32(w[i*4+1])<<8 | uint32(w[i*4+2])<<16 | uint32(w[i*4+3])<<24
+				transferWords[i].Set(word)
+			}
+		} else {
+			// We can't fill the entire transfer buffer, so we need to be a bit
+			// more careful.
+			// Note that parts of the transfer buffer that aren't used still
+			// need to be set to zero, otherwise we might be transferring
+			// garbage from a previous transmission if w is smaller than r.
+			for i := 0; i < 16; i++ {
+				var word uint32
+				if i*4+3 < len(w) {
+					word |= uint32(w[i*4+3]) << 24
+				}
+				if i*4+2 < len(w) {
+					word |= uint32(w[i*4+2]) << 16
+				}
+				if i*4+1 < len(w) {
+					word |= uint32(w[i*4+1]) << 8
+				}
+				if i*4+0 < len(w) {
+					word |= uint32(w[i*4+0]) << 0
+				}
+				transferWords[i].Set(word)
+			}
 		}
 
-		if i < len(r) {
-			r[i] = readByte
+		// Do the transfer.
+		bus.SetMS_DLEN_MS_DATA_BITLEN(uint32(chunkSize)*8 - 1)
+
+		bus.SetCMD_UPDATE(1)
+		for bus.GetCMD_UPDATE() != 0 {
 		}
+
+		bus.SetCMD_USR(1)
+		for bus.GetCMD_USR() != 0 {
+		}
+
+		// Read rx buffer.
+		rxSize := chunkSize
+		if rxSize > len(r) {
+			rxSize = len(r)
+		}
+		for i := 0; i < rxSize; i++ {
+			r[i] = byte(transferWords[i/4].Get() >> ((i % 4) * 8))
+		}
+
+		// Cut off some part of the output buffer so the next iteration we will
+		// only send the remaining bytes.
+		if len(w) < chunkSize {
+			w = nil
+		} else {
+			w = w[chunkSize:]
+		}
+		if len(r) < chunkSize {
+			r = nil
+		} else {
+			r = r[chunkSize:]
+		}
+		toTransfer -= chunkSize
 	}
 
 	return nil
