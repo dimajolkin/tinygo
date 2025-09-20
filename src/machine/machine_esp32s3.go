@@ -13,6 +13,9 @@ const deviceName = esp.Device
 
 const peripheralClock = 40_000000 // 80MHz
 
+// GPIO Matrix output signal value for simple GPIO mode
+const GPIO_FUNC_OUT_SEL_SIMPLE_GPIO = 256
+
 // CPUFrequency returns the current CPU frequency of the chip.
 // Currently it is a fixed frequency but it may allow changing in the future.
 func CPUFrequency() uint32 {
@@ -82,27 +85,28 @@ func (p Pin) Configure(config PinConfig) {
 	var muxConfig uint32
 
 	// Configure IO_MUX register for this pin
-	const function = 1          // Function 1 = GPIO mode for ESP32-S3
-	muxConfig |= function << 12 // MCU_SEL field (bits 14:12)
+	const function = 1 // Function 1 = GPIO mode for ESP32-S3
+	muxConfig |= function << esp.IO_MUX_GPIO_MCU_SEL_Pos
 
 	// Enable input path (required even for output pins for reading back state)
-	muxConfig |= 1 << 9 // FUN_IE bit (Input Enable)
+	muxConfig |= esp.IO_MUX_GPIO_FUN_IE
 
 	// Set drive strength (affects output current capability)
-	muxConfig |= 2 << 10 // FUN_DRV field (bits 11:10): 0=5mA, 1=10mA, 2=20mA, 3=40mA
+	// 0=5mA, 1=10mA, 2=20mA, 3=40mA - use moderate strength (2) as default
+	muxConfig |= 2 << esp.IO_MUX_GPIO_FUN_DRV_Pos
 
 	// Configure pull resistors
 	if config.Mode == PinInputPullup {
-		muxConfig |= 1 << 7 // FUN_WPU bit (Weak Pull Up)
+		muxConfig |= esp.IO_MUX_GPIO_FUN_WPU // Weak Pull Up
 	} else if config.Mode == PinInputPulldown {
-		muxConfig |= 1 << 8 // FUN_WPD bit (Weak Pull Down)
+		muxConfig |= esp.IO_MUX_GPIO_FUN_WPD // Weak Pull Down
 	}
 
 	// Apply IO_MUX configuration to the pin's pad
 	p.mux().Set(muxConfig)
 
-	// Set the output signal to the simple GPIO output (256 = simple GPIO mode).
-	p.outFunc().Set(256)
+	// Set the output signal to the simple GPIO output
+	p.outFunc().Set(GPIO_FUNC_OUT_SEL_SIMPLE_GPIO)
 
 	// Set output enable based on pin mode
 	switch config.Mode {
