@@ -17,6 +17,9 @@ const (
 	SPI_MODE1 = uint8(1)
 	SPI_MODE2 = uint8(2)
 	SPI_MODE3 = uint8(3)
+
+	// ESP32-S3 PLL clock frequency (same as ESP32-C3)
+	pplClockFreq = 80e6
 )
 
 // ESP32-S3 GPIO Matrix signal indices for SPI - CORRECTED from ESP-IDF gpio_sig_map.h
@@ -44,6 +47,54 @@ const (
 var (
 	ErrInvalidSPIBus = errors.New("machine: SPI bus is invalid")
 )
+
+// Compute the SPI bus frequency from the CPU frequency.
+// Ported from ESP32-C3 implementation for better accuracy.
+func freqToClockDiv(hz uint32) uint32 {
+	fcpu := CPUFrequency()
+	if hz >= fcpu { // maximum frequency
+		return 1 << 31
+	}
+	if hz < (fcpu / (16 * 64)) { // minimum frequency
+		return 15<<18 | 63<<12 | 31<<6 | 63 // pre=15, n=63
+	}
+
+	// iterate looking for an exact match
+	// or iterate all 16 prescaler options
+	// looking for the smallest error
+	var bestPre, bestN, bestErr uint32
+	bestN = 1
+	bestErr = 0xffffffff
+	q := uint32(float32(pplClockFreq)/float32(hz) + float32(0.5))
+	for p := uint32(0); p < 16; p++ {
+		n := q/(p+1) - 1
+		if n < 1 { // prescaler became too large, stop enum
+			break
+		}
+		if n > 63 { // prescaler too small, skip to next
+			continue
+		}
+
+		freq := fcpu / ((p + 1) * (n + 1))
+		if freq == hz { // exact match
+			return p<<18 | n<<12 | (n/2)<<6 | n
+		}
+
+		var err uint32
+		if freq < hz {
+			err = hz - freq
+		} else {
+			err = freq - hz
+		}
+		if err < bestErr {
+			bestErr = err
+			bestPre = p
+			bestN = n
+		}
+	}
+
+	return bestPre<<18 | bestN<<12 | (bestN/2)<<6 | bestN
+}
 
 // Serial Peripheral Interface on the ESP32-S3.
 type SPI struct {
@@ -194,47 +245,10 @@ func (spi *SPI) Configure(config SPIConfig) error {
 		bus.SetMISC_CK_IDLE_EDGE(1) // CPOL=1
 	}
 
-	// Calculate clock divider for frequency
-	// ESP32-S3 APB clock is typically 80MHz
-	apbClock := uint32(80000000)
-
-	// Try to get actual CPU frequency for better APB clock estimation
-	if cpuFreq := CPUFrequency(); cpuFreq > 0 {
-		if cpuFreq <= 80000000 {
-			apbClock = cpuFreq // APB = CPU for frequencies <= 80MHz
-		} else {
-			apbClock = cpuFreq / 4 // APB = CPU/4 for higher frequencies
-		}
-	}
-
-	// Calculate divider, ensuring it's within valid range
-	divider := apbClock / config.Frequency
-	if divider < 1 {
-		divider = 1
-	}
-	if divider > 0x3F {
-		divider = 0x3F // Maximum divider value
-	}
-
-	// Configure clock (after clearing CLOCK register above)
-	bus.SetCLOCK_CLK_EQU_SYSCLK(0)
-	bus.SetCLOCK_CLKDIV_PRE(divider - 1)
-	bus.SetCLOCK_CLKCNT_N(divider - 1)
-	bus.SetCLOCK_CLKCNT_H((divider / 2) - 1)
-	bus.SetCLOCK_CLKCNT_L(divider - 1)
+	// Configure SPI bus clock using ESP32-C3 algorithm for better accuracy
+	bus.CLOCK.Set(freqToClockDiv(config.Frequency))
 
 	return nil
-}
-
-func formatHex(val uint32) string {
-	hex := "0x"
-	digits := "0123456789ABCDEF"
-
-	for i := 7; i >= 0; i-- {
-		hex += string(digits[(val>>(i*4))&0xF])
-	}
-
-	return hex
 }
 
 // Transfer writes/reads a single byte using the SPI interface.
