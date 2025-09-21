@@ -58,3 +58,59 @@ call_start_cpu0:
 tinygo_scanCurrentStack:
     // TODO: save callee saved registers on the stack
     j tinygo_scanstack
+
+// ============================================================================
+// GPIO INTERRUPT HANDLER - ROM HOOK APPROACH
+// ============================================================================
+
+.section .text.gpio_interrupt_handler
+.global gpio_interrupt_handler
+.align 4
+gpio_interrupt_handler:
+    // Простой обработчик GPIO прерывания
+    // Включает GPIO4 как индикатор срабатывания
+    
+    entry   a1, 32                  // Стандартный entry для Xtensa
+    
+    // Зажечь GPIO4 как индикатор
+    // GPIO_OUT_W1TS_REG = 0x60004008
+    movi    a2, 0x60004008          // GPIO_OUT_W1TS_REG адрес
+    movi    a3, (1 << 4)            // GPIO4 bit
+    s32i    a3, a2, 0               // Включить GPIO4
+    
+    // Очистить GPIO interrupt status
+    // GPIO_STATUS_W1TC_REG = 0x60004014  
+    movi    a2, 0x60004014          // GPIO_STATUS_W1TC_REG адрес
+    movi    a3, (1 << 0)            // GPIO0 bit (предполагаем GPIO0 источник)
+    s32i    a3, a2, 0               // Очистить статус
+    
+    retw                            // Возврат из прерывания
+
+// ============================================================================
+// ROM FUNCTION CALL WRAPPER - ПРАВИЛЬНЫЙ XTENSA CALLING CONVENTION
+// ============================================================================
+
+.section .text.call_rom_function
+.global call_rom_function
+.align 4
+call_rom_function:
+    // Вызов ROM функции с правильным Xtensa ABI
+    // Входные параметры: a2=addr, a3=arg1, a4=arg2, a5=arg3, a6=arg4
+    // Результат возвращается в a2
+    
+    entry   a1, 32                  // Стандартный entry
+    
+    // Сохраняем адрес функции
+    mov     a8, a2                  // a8 = ROM function address
+    
+    // Переставляем аргументы в правильные регистры для ROM ABI
+    mov     a2, a3                  // a2 = arg1 (первый аргумент ROM функции)
+    mov     a3, a4                  // a3 = arg2
+    mov     a4, a5                  // a4 = arg3  
+    mov     a5, a6                  // a5 = arg4
+    
+    // Вызываем ROM функцию
+    callx0  a8                      // Непрямой вызов через регистр
+    
+    // Результат уже в a2 - просто возвращаем
+    retw
