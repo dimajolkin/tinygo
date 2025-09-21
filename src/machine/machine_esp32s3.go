@@ -3,7 +3,9 @@
 package machine
 
 import (
+	"device"
 	"device/esp"
+	"errors"
 	"runtime/interrupt"
 	"runtime/volatile"
 	"sync"
@@ -87,7 +89,7 @@ const (
 // Interrupt constants for ESP32-S3
 const (
 	maxPin              = 49 // ESP32-S3 has GPIO0-GPIO48 (GPIO20, GPIO24, GPIO28-31, GPIO47 не существуют)
-	cpuInterruptFromPin = 19 // Используем CPU interrupt 19 для GPIO прерываний
+	cpuInterruptFromPin = 19 // Возвращаемся к CPU interrupt 19
 )
 
 // PinChange represents a pin change interrupt trigger type
@@ -324,15 +326,32 @@ func (p Pin) SetInterrupt(change PinChange, callback func(Pin)) (err error) {
 	oldValue := p.pin().Get()
 	println("GPIO", p, "PIN регистр до:", oldValue)
 
-	p.pin().Set(
-		(p.pin().Get() & ^uint32(esp.GPIO_PIN_INT_TYPE_Msk|esp.GPIO_PIN_INT_ENA_Msk)) |
-			uint32(change)<<esp.GPIO_PIN_INT_TYPE_Pos | uint32(1)<<esp.GPIO_PIN_INT_ENA_Pos)
+	// УПРОЩЕННАЯ настройка GPIO interrupt - пошагово
+	println("Настраиваем GPIO interrupt пошагово...")
+
+	// Шаг 1: Очищаем старые биты interrupt
+	clearMask := uint32(esp.GPIO_PIN_INT_TYPE_Msk | esp.GPIO_PIN_INT_ENA_Msk)
+	clearedValue := p.pin().Get() & ^clearMask
+	println("  После очистки interrupt битов:", clearedValue)
+
+	// Шаг 2: Устанавливаем тип прерывания (PinFalling = 2)
+	intType := uint32(change) << esp.GPIO_PIN_INT_TYPE_Pos
+	valueWithType := clearedValue | intType
+	println("  После установки типа", change, ":", valueWithType)
+
+	// Шаг 3: Включаем прерывание
+	intEnable := uint32(1) << esp.GPIO_PIN_INT_ENA_Pos
+	finalValue := valueWithType | intEnable
+	println("  Финальное значение:", finalValue)
+
+	// Шаг 4: Записываем в регистр
+	p.pin().Set(finalValue)
 
 	newValue := p.pin().Get()
 	println("GPIO", p, "PIN регистр после:", newValue)
 
 	// Проверим что GPIO interrupt действительно включен
-	intType := (newValue & esp.GPIO_PIN_INT_TYPE_Msk) >> esp.GPIO_PIN_INT_TYPE_Pos
+	intType = (newValue & esp.GPIO_PIN_INT_TYPE_Msk) >> esp.GPIO_PIN_INT_TYPE_Pos
 	intEna := (newValue & esp.GPIO_PIN_INT_ENA_Msk) >> esp.GPIO_PIN_INT_ENA_Pos
 	println("GPIO", p, "interrupt type:", intType, "enabled:", intEna)
 
@@ -349,53 +368,352 @@ func setupPinInterrupt() error {
 	// ROM HOOK реализация для ESP32-S3
 	println("=== MACHINE: setupPinInterrupt - ROM HOOK ===")
 
+	// Шаг 0: Настраиваем диагностические GPIO (4-8) при старте
+	println("Настраиваем GPIO 4-8 как диагностические индикаторы...")
+
+	// Очищаем GPIO 4-8
+	esp.GPIO.OUT_W1TC.Set((1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8))
+
+	// Настраиваем GPIO 4-8 как OUTPUT
+	esp.GPIO.ENABLE_W1TS.Set((1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8))
+
+	println("GPIO 4-8 настроены как диагностические индикаторы:")
+	println("  GPIO4 = прерывание обработано")
+	println("  GPIO5 = handleInterrupt вызван")
+	println("  GPIO6 = перед callHandler")
+	println("  GPIO7 = после callHandler")
+	println("  GPIO8 = входим в callHandlers")
+
 	// Шаг 1: Настроить interrupt matrix через прямую запись в регистр
 	// Это эквивалентно ROM intr_matrix_set(ETS_GPIO_INTR_SOURCE, cpuInterruptFromPin, 1, 0)
 	println("Настраиваем interrupt matrix: GPIO source 16 -> CPU interrupt", cpuInterruptFromPin)
 
-	// ESP32-S3 использует INTERRUPT_CORE0 для маппинга
-	// GPIO_INTERRUPT_PRO_MAP регистр для маппинга GPIO прерываний
-	if esp.INTERRUPT_CORE0.GPIO_INTERRUPT_PRO_MAP.Get() != cpuInterruptFromPin {
-		esp.INTERRUPT_CORE0.GPIO_INTERRUPT_PRO_MAP.Set(cpuInterruptFromPin)
-		println("Interrupt matrix настроен - GPIO -> CPU", cpuInterruptFromPin)
-	} else {
-		println("Interrupt matrix уже настроен")
-	}
+	// ESP32-S3 имеет 4 GPIO interrupt MAP регистра - настроим ВСЕ!
+	println("Настраиваем ВСЕ GPIO interrupt MAP регистры...")
 
-	// Шаг 2: Зарегистрировать наш обработчик прерываний
-	println("Регистрируем Go обработчик прерываний...")
+	esp.INTERRUPT_CORE0.GPIO_INTERRUPT_PRO_MAP.Set(cpuInterruptFromPin)
+	println("  GPIO_INTERRUPT_PRO_MAP =", cpuInterruptFromPin)
 
-	// Используем стандартный interrupt.New для CPU interrupt
-	err := interrupt.New(cpuInterruptFromPin, gpioInterruptHandler).Enable()
+	esp.INTERRUPT_CORE0.GPIO_INTERRUPT_APP_MAP.Set(cpuInterruptFromPin)
+	println("  GPIO_INTERRUPT_APP_MAP =", cpuInterruptFromPin)
+
+	esp.INTERRUPT_CORE0.GPIO_INTERRUPT_PRO_NMI_MAP.Set(cpuInterruptFromPin)
+	println("  GPIO_INTERRUPT_PRO_NMI_MAP =", cpuInterruptFromPin)
+
+	esp.INTERRUPT_CORE0.GPIO_INTERRUPT_APP_NMI_MAP.Set(cpuInterruptFromPin)
+	println("  GPIO_INTERRUPT_APP_NMI_MAP =", cpuInterruptFromPin)
+
+	println("ВСЕ GPIO MAP регистры настроены на CPU interrupt", cpuInterruptFromPin)
+
+	// Шаг 2: ПРОСТОЙ ПОДХОД - TinyGo interrupt.New()
+	println("=== TINYGO INTERRUPT.NEW() ===")
+	println("Используем стандартный TinyGo подход!")
+
+	// Создаем Go обработчик прерывания
+	gpioInterrupt := interrupt.New(cpuInterruptFromPin, gpioInterruptHandler)
+
+	// Включаем прерывание через наш исправленный Enable()
+	err := gpioInterrupt.Enable()
 	if err != nil {
-		println("ОШИБКА: Не удалось зарегистрировать interrupt:", err.Error())
+		println("ОШИБКА TinyGo interrupt:", err.Error())
 		return err
 	}
 
-	println("ROM HOOK GPIO прерывания АКТИВИРОВАНЫ! 🎉")
+	println("TinyGo interrupt.New() обработчик зарегистрирован! 🎯")
+
+	println("TINYGO GPIO прерывания АКТИВИРОВАНЫ! 🎉")
 	return nil
 }
 
-// gpioInterruptHandler - обработчик GPIO прерываний для ESP32-S3
-func gpioInterruptHandler(intr interrupt.Interrupt) {
-	println("=== GPIO INTERRUPT HANDLER ВЫЗВАН! ===")
+// gpioInterruptHandler - Go обработчик GPIO прерывания
+func gpioInterruptHandler(interrupt.Interrupt) {
+	// БЕЗОПАСНЫЙ обработчик - БЕЗ println!
 
-	// Читаем статус GPIO прерываний
-	status := esp.GPIO.STATUS.Get()
-	println("GPIO interrupt status:", status)
+	// Включаем GPIO4 как индикатор прерывания
+	esp.GPIO.OUT_W1TS.Set(1 << 4)
 
-	// Обрабатываем каждый активный пин
-	for i := 0; i < maxPin; i++ {
-		mask := uint32(1 << i)
-		if (status&mask) != 0 && pinCallbacks[i] != nil {
-			println("GPIO", i, "interrupt - вызываем callback")
-			pinCallbacks[i](Pin(i))
-		}
+	// Очищаем GPIO interrupt status для GPIO0
+	esp.GPIO.STATUS_W1TC.Set(1 << 0)
+
+	// Прерывание обработано успешно (без вывода)
+}
+
+// getGPIOHandlerAddr возвращает адрес assembly обработчика
+func getGPIOHandlerAddr() uintptr {
+	// Ссылка на assembly функцию из esp32s3.S
+	return uintptr(unsafe.Pointer(&gpio_interrupt_handler))
+}
+
+// Ссылка на assembly функцию
+//
+// ВЕСЬ ROM HOOK КОД УДАЛЕН ДЛЯ СТАБИЛЬНОСТИ
+// Используем только TinyGo interrupt.New() + register-based Enable()
+func registerROMInterruptHandler(cpuInterrupt int, handlerAddr uintptr) error {
+	println("registerROMInterruptHandler: CPU interrupt", cpuInterrupt, "handler", handlerAddr)
+
+	// ROM функции адреса из нашей knowledge base
+	const (
+		ROM_ETS_ISR_ATTACH_ADDR = 0x40001b78
+		ROM_ETS_ISR_UNMASK_ADDR = 0x40001b90
+	)
+
+	// НОВЫЙ ПОДХОД: СОБСТВЕННАЯ VECTOR TABLE В RAM
+	println("  🎯 СОБСТВЕННАЯ VECTOR TABLE (в RAM)")
+	println("  Создаем собственную таблицу прерываний в RAM!")
+
+	// Шаг 1: Создаем vector table в RAM
+	err := createCustomVectorTable(cpuInterrupt, handlerAddr)
+	if err != nil {
+		println("  ОШИБКА создания vector table:", err.Error())
+		return err
 	}
 
-	// Очищаем статус прерываний
-	esp.GPIO.STATUS_W1TC.SetBits(status)
-	println("GPIO interrupt status очищен")
+	// Шаг 2: Включаем CPU interrupt через INTENABLE
+	println("  Включаем CPU interrupt", cpuInterrupt, "через INTENABLE...")
+	err = enableCPUInterruptDirect(cpuInterrupt)
+	if err != nil {
+		println("  ОШИБКА включения:", err.Error())
+		return err
+	}
+
+	println("СОБСТВЕННАЯ СИСТЕМА ПРЕРЫВАНИЙ ГОТОВА! 🎯")
+	return nil
+}
+
+// Собственная vector table в RAM (32 слота по 4 байта = 128 байт)
+// ВАЖНО: Выравниваем на 256 байт для VECBASE требований
+var customVectorTableBuffer [96]uintptr // 96*8 = 768 байт буфер
+var customVectorTable *[32]uintptr      // Указатель на выровненную часть
+
+// createCustomVectorTable создает собственную vector table в RAM
+func createCustomVectorTable(cpuInterrupt int, handlerAddr uintptr) error {
+	println("    createCustomVectorTable: создаем vector table в RAM")
+
+	// Получаем текущий ROM VECBASE
+	romVecbase := uintptr(device.AsmFull("rsr {}, VECBASE", nil))
+	println("    Текущий ROM VECBASE:", romVecbase)
+
+	// Выравниваем буфер на границу 256 байт
+	bufferAddr := uintptr(unsafe.Pointer(&customVectorTableBuffer[0]))
+	alignedAddr := (bufferAddr + 255) &^ 255 // Выравнивание на 256 байт
+	customVectorTable = (*[32]uintptr)(unsafe.Pointer(alignedAddr))
+
+	println("    Буфер адрес:", bufferAddr)
+	println("    Выровненный адрес:", alignedAddr)
+
+	// Копируем ROM vector table в нашу RAM таблицу
+	println("    Копируем ROM vector table в RAM...")
+	for i := 0; i < 32; i++ {
+		romSlot := *(*uintptr)(unsafe.Pointer(romVecbase + uintptr(i*4)))
+		customVectorTable[i] = romSlot
+	}
+
+	// Заменяем только наш слот на assembly обработчик
+	println("    Устанавливаем обработчик для interrupt", cpuInterrupt)
+	customVectorTable[cpuInterrupt] = handlerAddr
+
+	// Устанавливаем VECBASE на нашу выровненную RAM таблицу
+	ramVecbase := alignedAddr
+	println("    Устанавливаем VECBASE на выровненную RAM таблицу:", ramVecbase)
+
+	// КРИТИЧЕСКИЙ МОМЕНТ: Переключаем VECBASE
+	device.AsmFull("wsr {vecbase}, VECBASE", map[string]interface{}{
+		"vecbase": ramVecbase,
+	})
+
+	// Проверяем что VECBASE установлен
+	currentVecbase := uintptr(device.AsmFull("rsr {}, VECBASE", nil))
+	if currentVecbase == ramVecbase {
+		println("    VECBASE переключен на RAM! ✅")
+		return nil
+	} else {
+		println("    ОШИБКА: VECBASE не переключился!")
+		println("    Ожидали:", ramVecbase, "получили:", currentVecbase)
+		return errors.New("failed to set VECBASE")
+	}
+}
+
+// Собственная таблица обработчиков прерываний
+var customInterruptHandlers [32]uintptr
+
+// registerCustomInterruptHandler регистрирует обработчик в нашей таблице
+func registerCustomInterruptHandler(cpuInterrupt int, handlerAddr uintptr) error {
+	println("    registerCustomInterruptHandler: CPU", cpuInterrupt, "handler", handlerAddr)
+
+	if cpuInterrupt < 0 || cpuInterrupt >= 32 {
+		return errors.New("invalid CPU interrupt number")
+	}
+
+	// Сохраняем адрес обработчика в нашей таблице
+	customInterruptHandlers[cpuInterrupt] = handlerAddr
+	println("    Обработчик зарегистрирован в таблице!")
+
+	return nil
+}
+
+// enableCPUInterruptDirect включает CPU interrupt напрямую
+func enableCPUInterruptDirect(cpuInterrupt int) error {
+	println("    enableCPUInterruptDirect: включаем CPU interrupt", cpuInterrupt)
+
+	// ВРЕМЕННО ОТКЛЮЧАЕМ VECBASE - может быть защищен!
+	println("    ПРОПУСКАЕМ установку в VECBASE - тестируем без неё")
+
+	// Читаем текущий INTENABLE
+	current := uint32(device.AsmFull("rsr {}, INTENABLE", nil))
+	println("    Текущий INTENABLE:", current)
+
+	// Включаем наш бит
+	mask := uint32(1 << cpuInterrupt)
+	new := current | mask
+
+	// Записываем новое значение
+	device.AsmFull("wsr {intenable}, INTENABLE", map[string]interface{}{
+		"intenable": new,
+	})
+
+	// Проверяем результат
+	result := uint32(device.AsmFull("rsr {}, INTENABLE", nil))
+	println("    Новый INTENABLE:", result)
+
+	if (result & mask) != 0 {
+		println("    CPU interrupt", cpuInterrupt, "включен напрямую! ✅")
+		return nil
+	} else {
+		return errors.New("failed to enable CPU interrupt")
+	}
+}
+
+// installInterruptInVecbase устанавливает обработчик в VECBASE таблицу
+func installInterruptInVecbase(cpuInterrupt int) error {
+	println("    installInterruptInVecbase: устанавливаем в VECBASE таблицу")
+
+	// Читаем текущий VECBASE
+	vecbase := uintptr(device.AsmFull("rsr {}, vecbase", nil))
+	println("    Текущий VECBASE:", vecbase)
+
+	// Вычисляем адрес слота для нашего прерывания
+	slotAddr := vecbase + uintptr(cpuInterrupt*4)
+	println("    Слот для interrupt", cpuInterrupt, "по адресу:", slotAddr)
+
+	// Получаем адрес нашего обработчика
+	handlerAddr := customInterruptHandlers[cpuInterrupt]
+	if handlerAddr == 0 {
+		return errors.New("no handler registered")
+	}
+
+	// ОСТОРОЖНО: Записываем адрес обработчика в VECBASE таблицу
+	println("    КРИТИЧЕСКИЙ МОМЕНТ: записываем", handlerAddr, "по адресу", slotAddr)
+	*(*uintptr)(unsafe.Pointer(slotAddr)) = handlerAddr
+
+	println("    Обработчик установлен в VECBASE! ✅")
+	return nil
+}
+
+// initROMInterruptSystem - расширенная инициализация ROM interrupt системы
+func initROMInterruptSystem() error {
+	println("    initROMInterruptSystem: расширенная инициализация ROM...")
+
+	// ESP-IDF gpio_install_isr_service делает:
+	// 1. Выделяет память для ISR таблицы (32 обработчика)
+	// 2. Обнуляет все обработчики
+	// 3. Регистрирует общий диспетчер через ets_isr_attach
+	// 4. Включает прерывание через ets_isr_unmask
+
+	// Шаг 1: Инициализируем interrupt matrix
+	println("    Инициализируем interrupt matrix...")
+	initInterruptMatrix()
+
+	// Шаг 2: Настраиваем INTENABLE вручную
+	println("    Настраиваем INTENABLE напрямую...")
+	setupINTENABLE()
+
+	// Шаг 3: Включаем глобальные прерывания
+	println("    Включаем глобальные прерывания...")
+	enableGlobalInterrupts()
+
+	println("    ROM система инициализирована (расширенно)")
+	return nil
+}
+
+// initInterruptMatrix инициализирует interrupt matrix регистры
+func initInterruptMatrix() {
+	// Обнуляем все interrupt matrix регистры (как в ESP-IDF)
+	for i := 0; i < 32; i++ {
+		// Отключаем все CPU interrupts от источников
+		regAddr := uintptr(0x600c2000) + uintptr(i*4) // INTERRUPT_CORE0 base + offset
+		*(*uint32)(unsafe.Pointer(regAddr)) = 0
+	}
+	println("    Interrupt matrix обнулен")
+}
+
+// setupINTENABLE настраивает INTENABLE напрямую
+func setupINTENABLE() {
+	// Читаем текущий INTENABLE
+	current := uint32(device.AsmFull("rsr {}, INTENABLE", nil))
+	println("    Текущий INTENABLE:", current)
+
+	// НЕ включаем interrupt 19 пока - только подготавливаем систему
+	// Включение будет через ets_isr_unmask после регистрации обработчика
+
+	println("    INTENABLE подготовлен")
+}
+
+// enableGlobalInterrupts включает глобальные прерывания Xtensa
+func enableGlobalInterrupts() {
+	// Включаем прерывания на уровне процессора
+	// Эквивалентно xt_ints_on(0) или rsil 0
+	device.AsmFull("rsil {}, 0", nil)
+}
+
+// callROMFunctionSafe - РЕАЛЬНЫЙ вызов ROM функции
+func callROMFunctionSafe(addr, arg1, arg2, arg3, arg4 uintptr) uintptr {
+	println("    callROMFunctionSafe: РЕАЛЬНЫЙ ROM вызов!")
+	println("    адрес:", addr, "аргументы:", arg1, arg2, arg3, arg4)
+	println("    КРИТИЧЕСКИЙ МОМЕНТ: Если зависнет ЗДЕСЬ - проблема в ROM вызове")
+
+	// Используем наш assembly wrapper из esp32s3.S
+	result := call_rom_function_asm(addr, arg1, arg2, arg3, arg4)
+
+	println("    🎉 ROM ФУНКЦИЯ ВЫПОЛНЕНА!")
+	println("    Результат:", result)
+	println("    Система работает после ROM вызова! 🚀")
+
+	return result
+}
+
+// Ссылка на assembly функцию call_rom_function из esp32s3.S
+//
+//go:extern call_rom_function
+var call_rom_function [0]byte
+
+// call_rom_function_asm - ПРЯМОЙ ROM вызов через function pointer
+func call_rom_function_asm(addr, arg1, arg2, arg3, arg4 uintptr) uintptr {
+	println("    call_rom_function_asm: ПРЯМОЙ ROM вызов через function pointer")
+	println("    КРИТИЧЕСКИЙ МОМЕНТ: Если зависнет - ROM требует инициализации")
+
+	// Прямой вызов ROM функции как function pointer
+	switch {
+	case arg3 == 0 && arg4 == 0:
+		// 2 аргумента: ets_isr_unmask(interrupt_num)
+		fn := *(*func(uintptr) uintptr)(unsafe.Pointer(addr))
+		result := fn(arg1)
+		println("    ROM функция(", arg1, ") = ", result)
+		return result
+
+	case arg4 == 0:
+		// 3 аргумента: ets_isr_attach(interrupt_num, handler, arg)
+		fn := *(*func(uintptr, uintptr, uintptr) uintptr)(unsafe.Pointer(addr))
+		result := fn(arg1, arg2, arg3)
+		println("    ROM функция(", arg1, ",", arg2, ",", arg3, ") = ", result)
+		return result
+
+	default:
+		// 4+ аргументов
+		fn := *(*func(uintptr, uintptr, uintptr, uintptr) uintptr)(unsafe.Pointer(addr))
+		result := fn(arg1, arg2, arg3, arg4)
+		println("    ROM функция(", arg1, ",", arg2, ",", arg3, ",", arg4, ") = ", result)
+		return result
+	}
 }
 
 // TestGPIOStatus - тест для проверки генерации GPIO прерываний (публичная функция)

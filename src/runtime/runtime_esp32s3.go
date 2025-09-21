@@ -220,8 +220,6 @@ func debugGPIO(n int) {
 func main() {
 	// === EARLY DEBUG ===
 	// First, try to output something to see if we even get here
-	debugGPIO(4) // Turn on GPIO4 as early indicator
-
 	// === BOOTLOADER PHASE ===
 	// Initialize cache and MMU to enable access to flash memory
 	// This replaces the functionality normally provided by ESP-IDF bootloader
@@ -229,8 +227,6 @@ func main() {
 
 	// TEMPORARY: Skip cache/MMU init to test if ROM bootloader already did it
 	// ROM bootloader should have already set up basic cache/MMU for us
-	debugGPIO(5) // Indicate we're skipping cache init for now
-
 	// === APPLICATION PHASE ===
 	// This initialization configures the following things:
 	// * It disables all watchdog timers. They might be useful at some point in
@@ -809,5 +805,27 @@ func callROMFunctionAsm(addr, arg1, arg2, arg3, arg4 uintptr) uintptr {
 	println("  Результат:", result)
 	println("  Система работает после ROM вызова! 🚀")
 
+	return result
+}
+
+// ============================================================================
+// XT_INTS_ON ASSEMBLY FUNCTION - ESP32-S3 INTERRUPT ENABLE
+// ============================================================================
+
+// Ссылка на assembly функцию xt_ints_on
+//
+//go:extern xt_ints_on
+func xt_ints_on(mask uint32) uint32
+
+// xtIntsOn - Go обертка для assembly функции xt_ints_on
+func xtIntsOn(mask uint32) uint32 {
+	println("runtime.xtIntsOn: вызываем assembly функцию!")
+	println("  Входной параметр:", mask)
+
+	// Прямой вызов assembly функции
+	result := xt_ints_on(mask)
+
+	println("  xt_ints_on(", mask, ") вернул:", result)
+	println("  🎉 Assembly функция работает!")
 	return result
 }

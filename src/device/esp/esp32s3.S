@@ -53,6 +53,7 @@ call_start_cpu0:
     // Jump to the runtime start function written in Go.
     call4 main
 
+
 .section .text.tinygo_scanCurrentStack
 .global tinygo_scanCurrentStack
 tinygo_scanCurrentStack:
@@ -67,22 +68,38 @@ tinygo_scanCurrentStack:
 .global gpio_interrupt_handler
 .align 4
 gpio_interrupt_handler:
-    // Простой обработчик GPIO прерывания
-    // Включает GPIO4 как индикатор срабатывания
+    // ROM HOOK обработчик - вызывает Go функцию
     
     entry   a1, 32                  // Стандартный entry для Xtensa
     
-    // Зажечь GPIO4 как индикатор
-    // GPIO_OUT_W1TS_REG = 0x60004008
-    movi    a2, 0x60004008          // GPIO_OUT_W1TS_REG адрес
-    movi    a3, (1 << 4)            // GPIO4 bit
-    s32i    a3, a2, 0               // Включить GPIO4
+    // ИНДИКАТОР: Assembly обработчик вызван
+    movi    a2, 0x60004008          // GPIO_OUT_W1TS_REG 
+    movi    a3, (1 << 5)            // GPIO5 = assembly handler called
+    s32i    a3, a2, 0
     
-    // Очистить GPIO interrupt status
-    // GPIO_STATUS_W1TC_REG = 0x60004014  
-    movi    a2, 0x60004014          // GPIO_STATUS_W1TC_REG адрес
-    movi    a3, (1 << 0)            // GPIO0 bit (предполагаем GPIO0 источник)
+    // Очищаем GPIO interrupt status ПЕРЕД вызовом Go
+    movi    a2, 0x60004014          // GPIO_STATUS_W1TC_REG
+    movi    a3, (1 << 0)            // GPIO0 bit
     s32i    a3, a2, 0               // Очистить статус
+    
+    // ИНДИКАТОР: перед вызовом Go функции
+    movi    a2, 0x60004008          // GPIO_OUT_W1TS_REG
+    movi    a3, (1 << 6)            // GPIO6 = before Go call
+    s32i    a3, a2, 0
+    
+    // Вызываем Go функцию gpioInterruptHandler
+    // ПРИМЕЧАНИЕ: Это может не работать из-за calling convention!
+    // call4   gpioInterruptHandler
+    
+    // Пока просто включаем GPIO4 как индикатор
+    movi    a2, 0x60004008          // GPIO_OUT_W1TS_REG
+    movi    a3, (1 << 4)            // GPIO4 = interrupt handled
+    s32i    a3, a2, 0
+    
+    // ИНДИКАТОР: после обработки
+    movi    a2, 0x60004008          // GPIO_OUT_W1TS_REG
+    movi    a3, (1 << 7)            // GPIO7 = handler finished
+    s32i    a3, a2, 0
     
     retw                            // Возврат из прерывания
 
@@ -114,3 +131,32 @@ call_rom_function:
     
     // Результат уже в a2 - просто возвращаем
     retw
+
+// ============================================================================
+// MINIMAL TEST FUNCTION - DEBUG VERSION
+// ============================================================================
+
+.section .text.xt_ints_on
+.global runtime.xt_ints_on
+.align 4
+runtime.xt_ints_on:
+    // НАСТОЯЩАЯ реализация xt_ints_on из ESP-IDF
+    // uint32_t xt_ints_on(uint32_t mask)
+    // Включает биты в регистре INTENABLE
+    // Основано на ESP-IDF: components/xtensa/xtensa_intr_asm.S
+    
+    entry   a1, 32                  // Стандартный entry для Xtensa
+    
+    // Читаем текущий INTENABLE
+    rsr     a3, INTENABLE           // a3 = текущий INTENABLE
+    
+    // Включаем новые биты: new = current | mask
+    or      a4, a3, a2              // a4 = current | mask
+    
+    // Записываем обратно в INTENABLE  
+    wsr     a4, INTENABLE           // INTENABLE = new value
+    
+    // Возвращаем СТАРОЕ значение (как в ESP-IDF)
+    mov     a2, a3                  // return old value
+    
+    retw                            // Возврат
