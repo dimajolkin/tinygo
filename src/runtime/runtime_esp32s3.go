@@ -218,18 +218,10 @@ func debugGPIO(n int) {
 //
 //export main
 func main() {
-	// === EARLY DEBUG ===
-	// First, try to output something to see if we even get here
-	debugGPIO(4) // Turn on GPIO4 as early indicator
-
 	// === BOOTLOADER PHASE ===
 	// Initialize cache and MMU to enable access to flash memory
 	// This replaces the functionality normally provided by ESP-IDF bootloader
 	// Based on ESP-IDF bootloader_utility.c:set_cache_and_start_app()
-
-	// TEMPORARY: Skip cache/MMU init to test if ROM bootloader already did it
-	// ROM bootloader should have already set up basic cache/MMU for us
-	debugGPIO(5) // Indicate we're skipping cache init for now
 
 	// === APPLICATION PHASE ===
 	// This initialization configures the following things:
@@ -302,8 +294,6 @@ func initGPIOPeripherals() {
 	// Also enable GPIO sigma delta clock if needed
 	esp.GPIO_SD.SetSIGMADELTA_CG_CLK_EN(1)
 	esp.GPIO_SD.SetSIGMADELTA_MISC_FUNCTION_CLK_EN(1)
-
-	debugGPIO(7) // Indicate GPIO peripherals initialized
 }
 
 // initSPIPeripherals initializes SPI2 and SPI3 peripherals exactly like ESP-IDF
@@ -324,8 +314,6 @@ func initSPIPeripherals() {
 
 	// Initialize SPI2 master mode like ESP-IDF spi_ll_master_init
 	initSPI2Master()
-
-	debugGPIO(6) // Indicate SPI peripherals initialized
 }
 
 // initSPI2Master initializes SPI2 in master mode exactly like ESP-IDF spi_ll_master_init
