@@ -2,14 +2,7 @@
 
 package task
 
-import (
-	"unsafe"
-)
-
-// Отладочные переменные для проверки значений из ассемблера
-var debugA2Value uint32
-var debugA3Value uint32
-var debugSPValue uint32
+import "unsafe"
 
 //go:extern tinygo_startTask
 var tinygo_startTask [0]byte
@@ -60,9 +53,6 @@ func (s *state) archInit(r *calleeSavedRegs, fn uintptr, args unsafe.Pointer) {
 	entry := uintptr(unsafe.Pointer(&tinygo_startTask))
 	frame := uintptr(unsafe.Pointer(r))
 
-	// Логирование инициализации задачи
-	println("archInit: entry=", entry, "frame=", frame, "fn=", fn, "args=", uintptr(args))
-
 	r.exit = 0
 	r.pc = uint32(entry)
 	r.ps = psUserMask | psExcmMask | psWoeMask | psCallInc1
@@ -93,53 +83,18 @@ func (s *state) archInit(r *calleeSavedRegs, fn uintptr, args unsafe.Pointer) {
 	r.tmp2 = 0
 
 	s.sp = frame
-
-	// Логирование завершения инициализации
-	println("archInit: completed, sp=", s.sp, "pc=", r.pc, "ps=", r.ps)
 }
 
 func (s *state) resume() {
-	println("resume: starting, current sp=", s.sp, "systemStack=", systemStack)
-	println("resume: calling swapTask with newStack=", s.sp, "systemStackPtr=", uintptr(unsafe.Pointer(&systemStack)))
-	println("resume: about to call swapTask...")
-
-	// Temporary workaround: save a dummy value to systemStack without calling asm
-	// This tests if the problem is in the asm function or elsewhere
-	systemStack = getCurrentStackPointer()
-	println("resume: saved current SP to systemStack")
-
-	// swapTask(s.sp, &systemStack) // Как в ESP32: переключиться на s.sp, сохранить текущий в systemStack
-	println("resume: swapTask bypassed!")
-	println("resume: debug a2=", debugA2Value)
-	println("resume: debug a3=", debugA3Value)
-	println("resume: debug sp=", debugSPValue)
-	println("resume: completed, systemStack=", systemStack)
-}
-
-// Helper function to get current stack pointer in Go
-func getCurrentStackPointer() uintptr {
-	var dummy int
-	return uintptr(unsafe.Pointer(&dummy))
+	swapTask(s.sp, &systemStack)
 }
 
 func (s *state) pause() {
-	println("pause: starting, current systemStack=", systemStack, "sp=", s.sp)
 	saved := systemStack
 	systemStack = 0
 	swapTask(saved, &s.sp)
-	println("pause: completed, saved=", saved, "new sp=", s.sp, "systemStack=", systemStack)
 }
 
 func SystemStack() uintptr {
-	println("SystemStack: returning", systemStack)
 	return systemStack
-}
-
-//export debugStoreValues
-func debugStoreValues(a2, a3, sp uint32) {
-	println("debugStoreValues called!")
-	debugA2Value = a2
-	debugA3Value = a3
-	debugSPValue = sp
-	println("debugStoreValues completed!")
 }

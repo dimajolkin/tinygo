@@ -484,6 +484,19 @@ func debugSwapArgs(newSp uintptr, oldSpPtr uintptr) {
 	println("SWAPARGS:", newSp, oldSpPtr)
 }
 
+//go:export tinygo_xt_int_enter
+func tinygo_xt_int_enter() {
+}
+
+//go:export tinygo_xt_int_exit
+func tinygo_xt_int_exit() {
+}
+
+//go:export tinygo_xt_timer_int
+func tinygo_xt_timer_int() {
+	// TODO: invoke scheduler tick
+}
+
 //go:extern _vector_table
 var _vector_table [0]uintptr
 
@@ -504,3 +517,15 @@ func enableVecbaseOverrideAsm(vecbaseShifted uint32)
 
 //go:extern _tinygo_vectors_present
 var _tinygo_vectors_present [0]byte
+
+//go:extern port_xSchedulerRunning
+var port_xSchedulerRunning uint32
+
+//go:extern port_interruptNesting
+var port_interruptNesting uint32
+
+//go:extern port_switch_flag
+var port_switch_flag uint32
+
+//go:extern _xt_tick_divisor
+var _xt_tick_divisor uint32
