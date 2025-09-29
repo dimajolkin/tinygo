@@ -29,9 +29,14 @@ func Pause() {
 // Resume the task until it pauses or completes.
 // This may only be called from the scheduler.
 func (t *Task) Resume() {
+	println("DEBUG: Task.Resume() called for task", t)
 	currentTask = t
+	println("DEBUG: Task.Resume() calling gcData.swap()")
 	t.gcData.swap()
+	println("DEBUG: Task.Resume() calling t.state.resume()")
 	t.state.resume()
+	println("DEBUG: Task.Resume() t.state.resume() returned")
 	t.gcData.swap()
 	currentTask = nil
+	println("DEBUG: Task.Resume() completed")
 }

@@ -19,6 +19,28 @@ ENTRY(call_start_cpu0)
 
 SECTIONS
 {
+    /* Place Xtensa vector table at the very start of IRAM and reserve 0x400 bytes. */
+    .vectors : ALIGN(0x400)
+    {
+        . = ORIGIN(IRAM);
+        _vector_table = ABSOLUTE(.);
+        /* Window vectors (fixed layout within first 0x180 bytes) */
+        KEEP(*(.WindowVectors.text))
+
+        /* Interrupt/exception vectors at specified offsets from VECBASE */
+        . = _vector_table + 0x180; KEEP(*(.Level2InterruptVector.text))
+        . = _vector_table + 0x1C0; KEEP(*(.Level3InterruptVector.text))
+        . = _vector_table + 0x200; KEEP(*(.Level4InterruptVector.text))
+        . = _vector_table + 0x240; KEEP(*(.Level5InterruptVector.text))
+        . = _vector_table + 0x280; KEEP(*(.Level6InterruptVector.text))
+        . = _vector_table + 0x2C0; KEEP(*(.NMIExceptionVector.text))
+        . = _vector_table + 0x300; KEEP(*(.KernelExceptionVector.text))
+        . = _vector_table + 0x340; KEEP(*(.UserExceptionVector.text))
+        . = _vector_table + 0x3C0; KEEP(*(.DoubleExceptionVector.text))
+
+        /* Reserve full 0x400 bytes for vector area */
+        . = _vector_table + 0x400;
+    } >IRAM
     /* Constant literals and code. Loaded into IRAM for now. Eventually, most
      * code should be executed directly from flash.
      * Note that literals must be before code for the l32r instruction to work.

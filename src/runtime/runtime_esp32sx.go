@@ -24,6 +24,12 @@ func buffered() int {
 	return machine.Serial.Buffered()
 }
 
+//go:extern _sbss
+var _sbss [0]byte
+
+//go:extern _ebss
+var _ebss [0]byte
+
 // Initialize .bss: zero-initialized global variables.
 // The .data section has already been loaded by the ROM bootloader.
 func clearbss() {

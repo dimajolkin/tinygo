@@ -1,4 +1,4 @@
-//go:build scheduler.tasks && (esp32 || esp32s3)
+//go:build scheduler.tasks && esp32
 
 package task
 
@@ -16,6 +16,11 @@ import (
 )
 
 var systemStack uintptr
+
+//export debugMark
+func debugMark(v uint32) {
+	println("SWAPDBG:", v)
+}
 
 // calleeSavedRegs is the list of registers that must be saved and restored when
 // switching between tasks. Also see task_stack_esp8266.S that relies on the

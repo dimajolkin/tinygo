@@ -25,7 +25,6 @@ import (
 	"device"
 	"device/esp"
 	"machine"
-	"runtime/volatile"
 	"unsafe"
 )
 
@@ -223,6 +222,7 @@ func main() {
 	// This replaces the functionality normally provided by ESP-IDF bootloader
 	// Based on ESP-IDF bootloader_utility.c:set_cache_and_start_app()
 
+	debugGPIO(5)
 	// === APPLICATION PHASE ===
 	// This initialization configures the following things:
 	// * It disables all watchdog timers. They might be useful at some point in
@@ -278,11 +278,104 @@ func main() {
 	// TEST: Generate 50kHz signal on GPIO36 for debugging
 	// testGPIO36_50kHz()
 
-	// Now use standard run() which will call initHeap() again but it should be safe
+	// Debug: vector base target (don't read VECBASE here to avoid traps)
+	println("VEC: _vector_table=", uintptr(unsafe.Pointer(&_vector_table)), " anchor=", uintptr(unsafe.Pointer(&_tinygo_vectors_present)))
+
+	// Re-enable vector table override but be more careful
+	enableVecbaseOverride()
+	println("VEC: Override re-enabled")
+
+	// Make sure cache is enabled
+	if !isCacheEnabled() {
+		println("Cache disabled, re-enabling...")
+		enableCache()
+	} else {
+		println("Cache is enabled")
+	}
+
+	// Dump vector table for debugging
+	dumpVectorTableRaw()
+	println("VEC: OV0.MASK=", esp.SENSITIVE.GetCORE_0_VECBASE_OVERRIDE_0_CORE_0_VECBASE_WORLD_MASK())
+	println("VEC: OV1.W0=", esp.SENSITIVE.GetCORE_0_VECBASE_OVERRIDE_1_CORE_0_VECBASE_OVERRIDE_WORLD0_VALUE())
+	println("VEC: OV1.SEL=", esp.SENSITIVE.GetCORE_0_VECBASE_OVERRIDE_1_CORE_0_VECBASE_OVERRIDE_SEL())
+	println("VEC: LOCK=", esp.SENSITIVE.GetCORE_0_VECBASE_OVERRIDE_LOCK())
+	// println("VEC: OV0.MASK=", esp.SENSITIVE.GetCORE_0_VECBASE_OVERRIDE_0_CORE_0_VECBASE_WORLD_MASK())
+	// println("VEC: OV1.W0=", esp.SENSITIVE.GetCORE_0_VECBASE_OVERRIDE_1_CORE_0_VECBASE_OVERRIDE_WORLD0_VALUE())
+	// println("VEC: OV1.SEL=", esp.SENSITIVE.GetCORE_0_VECBASE_OVERRIDE_1_CORE_0_VECBASE_OVERRIDE_SEL())
+	// println("VEC: LOCK=", esp.SENSITIVE.GetCORE_0_VECBASE_OVERRIDE_LOCK())
+
+	// Extra diagnostics: clear GPIO pending only (avoid get_ps/get_interrupt until vectors verified)
+	esp.GPIO.SetSTATUS_W1TC(0xFFFFFFFF)
+	esp.GPIO.SetSTATUS1_W1TC(0x3FFFFF)
+
+	// Тестируем debugMark из Go-кода
+	println("Testing debugMark from Go...")
+	debugMark(0x12345678)
+	println("debugMark test completed")
+	println("debugMark call count so far:", debugMarkCallCount)
+
+	// Hold here to observe stability before entering run()
 	run()
 
 	// Fallback: if main ever returns, hang the CPU.
 	exit(0)
+}
+
+// enableVecbaseOverride sets CORE_0_VECBASE_OVERRIDE_* to point to `_vector_table` in RAM.
+// It does not lock or enable for world1. World mask enables world0 only.
+func enableVecbaseOverride() {
+	// Compute address >> 2 as required by hardware encoding
+	vecbaseAddr := (uint32(uintptr(unsafe.Pointer(&_vector_table))) >> 2) & 0x3fffff
+	// Program override via SENSITIVE registers directly (SEL=0b01, world0 only)
+	esp.SENSITIVE.SetCORE_0_VECBASE_OVERRIDE_0_CORE_0_VECBASE_WORLD_MASK(1)
+	esp.SENSITIVE.SetCORE_0_VECBASE_OVERRIDE_1_CORE_0_VECBASE_OVERRIDE_WORLD0_VALUE(vecbaseAddr)
+	esp.SENSITIVE.SetCORE_0_VECBASE_OVERRIDE_1_CORE_0_VECBASE_OVERRIDE_SEL(0b01)
+}
+
+// dumpVectorTable prints a small hexdump of vector slots at key offsets.
+func dumpVectorTable() {
+	base := uintptr(unsafe.Pointer(&_vector_table))
+	offsets := []uint32{0x0, 0x40, 0x80, 0xC0, 0x100, 0x140, 0x180, 0x1C0, 0x200, 0x240, 0x280, 0x2C0, 0x300, 0x340, 0x3C0}
+	names := []string{"WinOV4", "WinUF4", "WinOV8", "WinUF8", "WinOV12", "WinUF12", "Lvl2", "Lvl3", "Lvl4", "Lvl5", "Lvl6", "NMI", "Kernel", "User", "Double"}
+	println("VEC DUMP: base=", base)
+	for i := 0; i < len(offsets); i++ {
+		off := uintptr(offsets[i])
+		a0 := *(*uint32)(unsafe.Pointer(base + off + 0))
+		a1 := *(*uint32)(unsafe.Pointer(base + off + 4))
+		a2 := *(*uint32)(unsafe.Pointer(base + off + 8))
+		a3 := *(*uint32)(unsafe.Pointer(base + off + 12))
+		println("  ", names[i], "@+", offsets[i], ":", a0, a1, a2, a3)
+	}
+}
+
+// dumpVectorTableRaw prints fixed slots without using slices/loops to avoid runtime allocations.
+func dumpVectorTableRaw() {
+	baseIRAM := uintptr(unsafe.Pointer(&_vector_table))
+	// helpers (read directly from IRAM)
+	printSlot := func(label string, off uintptr) {
+		addr := baseIRAM + off
+		a0 := *(*uint32)(unsafe.Pointer(addr + 0))
+		a1 := *(*uint32)(unsafe.Pointer(addr + 4))
+		a2 := *(*uint32)(unsafe.Pointer(addr + 8))
+		a3 := *(*uint32)(unsafe.Pointer(addr + 12))
+		println("  ", label, "@+ 0x", off, ":", a0, a1, a2, a3)
+	}
+	println("VEC DUMP: baseIRAM=", baseIRAM)
+	printSlot("WinOV4", 0x0)
+	printSlot("WinUF4", 0x40)
+	printSlot("WinOV8", 0x80)
+	printSlot("WinUF8", 0xC0)
+	printSlot("WinOV12", 0x100)
+	printSlot("WinUF12", 0x140)
+	printSlot("Lvl2", 0x180)
+	printSlot("Lvl3", 0x1C0)
+	printSlot("Lvl4", 0x200)
+	printSlot("Lvl5", 0x240)
+	printSlot("Lvl6", 0x280)
+	printSlot("NMI", 0x2C0)
+	printSlot("Kernel", 0x300)
+	printSlot("User", 0x340)
+	printSlot("Double", 0x3C0)
 }
 
 // initGPIOPeripherals initializes GPIO and IO_MUX peripherals exactly like ESP-IDF
@@ -349,255 +442,65 @@ func abort() {
 	}
 }
 
+// Глобальный счетчик вызовов debugMark
+var debugMarkCallCount uint32
+
+//export debugMark
+func debugMark(v uint32) {
+	debugMarkCallCount++
+
+	// Используем GPIO для индикации вызова функции
+	debugGPIO(4) // Включаем GPIO4 для индикации
+
+	// Попробуем вывести сообщение (может не работать если UART не инициализирован)
+	println("SWAPDBG:", v, "call#", debugMarkCallCount)
+
+	// Дополнительная индикация через GPIO в зависимости от значения
+	if v == 0xDEADBEEF {
+		debugGPIO(6) // GPIO6 для tinygo_startTask
+	} else if v == 0x1234 { // SWAP entry marker
+		debugGPIO(5) // GPIO5 для tinygo_swapTask entry
+	} else if v == 0x5678 { // SWAP completion marker
+		debugGPIO(7) // GPIO7 для tinygo_swapTask completion
+	} else if v == 0xEEEEFF00 {
+		debugGPIO(8) // GPIO8 для context_save
+	} else if v >= 0xEEEE0000 && v <= 0xEEEE1111 {
+		debugGPIO(9) // GPIO9 для context_restore
+	}
+}
+
+//export debugDumpUnderflowFrame
+func debugDumpUnderflowFrame(sp uintptr) {
+	base := sp
+	w0 := *(*uint32)(unsafe.Pointer(base - 16))
+	w1 := *(*uint32)(unsafe.Pointer(base - 12))
+	w2 := *(*uint32)(unsafe.Pointer(base - 8))
+	w3 := *(*uint32)(unsafe.Pointer(base - 4))
+	println("SWAPUF:", base, w0, w1, w2, w3)
+}
+
+//export debugSwapArgs
+func debugSwapArgs(newSp uintptr, oldSpPtr uintptr) {
+	println("SWAPARGS:", newSp, oldSpPtr)
+}
+
 //go:extern _vector_table
 var _vector_table [0]uintptr
 
-//go:extern _sbss
-var _sbss [0]byte
+//go:extern get_vecbase
+func get_vecbase() uint32
 
-//go:extern _ebss
-var _ebss [0]byte
+//go:extern disableAllInterrupts
+func disableAllInterrupts()
 
-// ESP32-S3 GPIO Matrix signal indices - from ESP-IDF gpio_sig_map.h
-// Source: /esp-idf/components/soc/esp32s3/include/soc/gpio_sig_map.h
-const (
-	// SPI2 (FSPI) signals
-	FSPICLK_OUT_IDX = 101 // Line 186: #define FSPICLK_OUT_IDX 101
-	FSPIQ_OUT_IDX   = 102 // Line 188: #define FSPIQ_OUT_IDX 102 (MISO)
-	FSPID_OUT_IDX   = 103 // Line 190: #define FSPID_OUT_IDX 103 (MOSI)
+//go:extern get_ps
+func get_ps() uint32
 
-	// SPI3 signals
-	SPI3_CLK_OUT_IDX = 66 // Line 136: #define SPI3_CLK_OUT_IDX 66
-	SPI3_Q_OUT_IDX   = 67 // Line 138: #define SPI3_Q_OUT_IDX 67 (MISO)
-	SPI3_D_OUT_IDX   = 68 // Line 140: #define SPI3_D_OUT_IDX 68 (MOSI)
-)
+//go:extern get_interrupt
+func get_interrupt() uint32
 
-// testGPIO36_50kHz - COMPLETE SCK generator test
-func testGPIO36_50kHz() {
-	println("=== COMPLETE SCK GENERATOR TEST ===")
+//go:extern enableVecbaseOverrideAsm
+func enableVecbaseOverrideAsm(vecbaseShifted uint32)
 
-	// TEST 1: Basic GPIO test on pin 12
-	// println("TEST 1: Basic GPIO12 control")
-	// esp.GPIO.ENABLE_W1TS.Set(1 << 12)
-	// for i := 0; i < 5; i++ {
-	// 	esp.GPIO.OUT_W1TS.Set(1 << 12) // HIGH
-	// 	for j := 0; j < 50000; j++ {
-	// 	} // Wait
-	// 	esp.GPIO.OUT_W1TC.Set(1 << 12) // LOW
-	// 	for j := 0; j < 50000; j++ {
-	// 	} // Wait
-	// 	println("GPIO12 toggle", i)
-	// }
-	// println("TEST 1: GPIO12 basic control - DONE (should see 5 toggles)")
-
-	// TEST 2: Arduino-style SPI initialization
-	//testArduinoStyleSPI()
-
-	// TEST 3: Try both SPI2 and SPI3 peripherals
-	testSCKGenerator(esp.SPI2, "SPI2", 2)
-	///testSCKGenerator(esp.SPI3, "SPI3", 3)
-
-	println("=== ALL SCK TESTS COMPLETED ===")
-}
-
-// testArduinoStyleSPI mimics Arduino SPI initialization
-func testArduinoStyleSPI() {
-	println("=== ARDUINO STYLE SPI TEST ===")
-
-	// Use SPI2 (HSPI in Arduino terms)
-	spi := esp.SPI2
-
-	// Enable SPI2 clocks
-	esp.SYSTEM.SetPERIP_CLK_EN0_SPI2_CLK_EN(1)
-	esp.SYSTEM.SetPERIP_RST_EN0_SPI2_RST(1)
-	esp.SYSTEM.SetPERIP_RST_EN0_SPI2_RST(0)
-
-	// Configure GPIO12 as SPI CLK using GPIO matrix (like Arduino)
-	esp.GPIO.ENABLE_W1TS.Set(1 << 12) // Enable GPIO12 output
-
-	// Configure GPIO12 IO MUX - set as GPIO function (not dedicated SPI)
-	gpio12_iomux := (*volatile.Register32)(unsafe.Pointer(uintptr(0x60009048)))
-	gpio12_iomux.Set((gpio12_iomux.Get() & ^uint32(0x7000)) | (2 << 12) | (1 << 8) | (3 << 10)) // GPIO function, pull-up, drive strength 3
-
-	// Route SPI2 CLK signal to GPIO12 through GPIO matrix
-	gpio12_out_func := (*volatile.Register32)(unsafe.Add(unsafe.Pointer(&esp.GPIO.FUNC0_OUT_SEL_CFG), uintptr(12)*4))
-	gpio12_out_func.Set(FSPICLK_OUT_IDX) // SPI2 CLK signal
-
-	println("ARDUINO: GPIO12 configured - IOMUX=", gpio12_iomux.Get(), "OUT_FUNC=", gpio12_out_func.Get())
-
-	// Arduino-style register setup
-	spi.USER.Set(0)
-	spi.USER1.Set(0)
-	spi.CTRL.Set(0)
-	// spi.CTRL1.Set(0) // Not available in this SPI type
-	spi.MISC.Set(0)
-	spi.CLOCK.Set(0)
-	spi.CLK_GATE.Set(0)
-
-	// Enable clocks (Arduino style)
-	spi.SetCLK_GATE_CLK_EN(1)
-	spi.SetCLK_GATE_MST_CLK_ACTIVE(1)
-	spi.SetCLK_GATE_MST_CLK_SEL(1)
-
-	// Master mode configuration
-	spi.SetUSER_USR_MOSI(1)
-	spi.SetUSER_DOUTDIN(1) // Full duplex
-	spi.SetMISC_CK_DIS(0)  // Enable clock output
-
-	// Moderate clock for visibility (not too slow)
-	// APB clock = 80MHz, divider = 8 -> ~10MHz SPI clock
-	divider := uint32(8)
-	spi.SetCLOCK_CLKDIV_PRE(divider - 1)
-	spi.SetCLOCK_CLKCNT_N(divider - 1)
-	spi.SetCLOCK_CLKCNT_H((divider / 2) - 1)
-	spi.SetCLOCK_CLKCNT_L(divider - 1)
-	spi.SetCLOCK_CLK_EQU_SYSCLK(0) // Use divided clock
-
-	println("ARDUINO: SPI2 configured, registers:")
-	println("  USER=", spi.USER.Get())
-	println("  CLK_GATE=", spi.CLK_GATE.Get())
-	println("  CLOCK=", spi.CLOCK.Get())
-	println("  GPIO12 FUNC=", gpio12_out_func.Get())
-
-	// Test transmission
-	for i := 0; i < 10000; i++ {
-		println("ARDUINO: Transmitting byte", i)
-		spi.SetMS_DLEN_MS_DATA_BITLEN(7) // 8 bits
-		spi.W0.Set(0xFF)
-		spi.SetCMD_USR(1)
-
-		// Wait for completion
-		for spi.GetCMD_USR() != 0 {
-			// Wait
-		}
-
-		// Small delay between transmissions
-		for j := 0; j < 50000; j++ {
-		}
-	}
-
-	println("ARDUINO: 20 SPI transmissions completed - check GPIO12!")
-}
-
-// testSCKGenerator tests SCK generation on specific SPI peripheral
-func testSCKGenerator(spi *esp.SPI2_Type, name string, busID int) {
-	println("TEST: SCK generator on", name)
-
-	// Enable peripheral clocks
-	if busID == 2 {
-		esp.SYSTEM.SetPERIP_CLK_EN0_SPI2_CLK_EN(1)
-		esp.SYSTEM.SetPERIP_RST_EN0_SPI2_RST(1)
-		esp.SYSTEM.SetPERIP_RST_EN0_SPI2_RST(0)
-	} else {
-		esp.SYSTEM.SetPERIP_CLK_EN0_SPI3_CLK_EN(1)
-		esp.SYSTEM.SetPERIP_RST_EN0_SPI3_RST(1)
-		esp.SYSTEM.SetPERIP_RST_EN0_SPI3_RST(0)
-	}
-
-	// Configure GPIO12 for this SPI
-	esp.GPIO.ENABLE_W1TS.Set(1 << 12)
-	gpio12_iomux := (*volatile.Register32)(unsafe.Pointer(uintptr(0x60009048)))
-	gpio12_iomux.Set((gpio12_iomux.Get() & ^uint32(0x7000)) | (2 << 12) | (1 << 8) | (3 << 10)) // GPIO function
-
-	// Route SPI CLK signal to GPIO12 through GPIO matrix
-	gpio12_out_func := (*volatile.Register32)(unsafe.Add(unsafe.Pointer(&esp.GPIO.FUNC0_OUT_SEL_CFG), uintptr(12)*4))
-	if busID == 2 {
-		gpio12_out_func.Set(FSPICLK_OUT_IDX) // SPI2 CLK signal
-		println(name, "using SPI2 CLK signal", FSPICLK_OUT_IDX)
-	} else {
-		gpio12_out_func.Set(SPI3_CLK_OUT_IDX) // SPI3 CLK signal
-		println(name, "using SPI3 CLK signal", SPI3_CLK_OUT_IDX)
-	}
-
-	// ESP-IDF STYLE SPI MASTER INITIALIZATION
-	println(name, "ESP-IDF style initialization...")
-
-	// Reset all registers first (like ESP-IDF)
-	spi.USER.Set(0)
-	spi.USER1.Set(0)
-	spi.CTRL.Set(0)
-	spi.MISC.Set(0)
-	spi.CLOCK.Set(0)
-	spi.CLK_GATE.Set(0)
-	spi.DMA_CONF.Set(0)
-	spi.SLAVE.Set(0)
-
-	// CRITICAL: ESP-IDF master clock setup
-	spi.SetCLK_GATE_MST_CLK_ACTIVE(1) // hw->clk_gate.mst_clk_active = 1
-	spi.SetCLK_GATE_MST_CLK_SEL(1)    // hw->clk_gate.mst_clk_sel = 1
-	spi.SetCLK_GATE_CLK_EN(1)         // hw->clk_gate.clk_en = 1
-
-	// DMA configuration (like ESP-IDF) - simplified
-	spi.DMA_CONF.Set(0) // Reset DMA config
-
-	// Buffer configuration
-	spi.SetUSER_USR_MISO_HIGHPART(0)
-	spi.SetUSER_USR_MOSI_HIGHPART(0)
-
-	// Enable MOSI and clock output (like ESP-IDF)
-	spi.SetUSER_USR_MOSI(1) // Enable MOSI phase
-	spi.SetMISC_CK_DIS(0)   // Enable CLK output - CRITICAL!
-
-	// ESP-IDF style clock configuration for 50kHz
-	// APB clock is 80MHz, need very slow divider
-	divider := uint32(63) // Maximum divider for slowest clock
-	spi.SetCLOCK_CLKDIV_PRE(divider - 1)
-	spi.SetCLOCK_CLKCNT_N(divider - 1)
-	spi.SetCLOCK_CLKCNT_H((divider / 2) - 1)
-	spi.SetCLOCK_CLKCNT_L(divider - 1)
-	spi.SetCLOCK_CLK_EQU_SYSCLK(0) // Use divided clock
-
-	// CRITICAL: Apply configuration (like ESP-IDF spi_ll_apply_config)
-	spi.SetCMD_UPDATE(1)
-	for spi.GetCMD_UPDATE() != 0 {
-		// Wait for config to be applied
-	}
-	println(name, "configuration applied")
-
-	println(name, "registers: USER=", spi.USER.Get(), "CLK_GATE=", spi.CLK_GATE.Get(), "CLOCK=", spi.CLOCK.Get())
-
-	// ESP-IDF style transmission
-	println(name, "starting ESP-IDF style transmission...")
-
-	// Set data length and data
-	spi.SetMS_DLEN_MS_DATA_BITLEN(7) // 8 bits - 1
-	spi.W0.Set(0xFF)
-
-	// Clear interrupt flags (like ESP-IDF)
-	spi.SetDMA_INT_CLR_TRANS_DONE_INT_CLR(1)
-
-	// Apply configuration before transmission
-	spi.SetCMD_UPDATE(1)
-	for spi.GetCMD_UPDATE() != 0 {
-		// Wait for update
-	}
-
-	// Start user transaction (like ESP-IDF spi_ll_user_start)
-	spi.SetCMD_USR(1)
-
-	// Wait for transmission (like ESP-IDF spi_ll_usr_is_done)
-	timeout := 0
-	for spi.GetDMA_INT_RAW_TRANS_DONE_INT_RAW() == 0 && timeout < 100000 {
-		timeout++
-	}
-
-	println(name, "transmission completed in", timeout, "cycles, TRANS_DONE=", spi.GetDMA_INT_RAW_TRANS_DONE_INT_RAW())
-
-	if timeout > 0 {
-		println(name, "SCK SHOULD BE ACTIVE - check GPIO12 now!")
-		// Keep transmitting for oscilloscope measurement
-		for {
-			spi.SetMS_DLEN_MS_DATA_BITLEN(7)
-			spi.W0.Set(0xFF)
-			spi.SetCMD_USR(1)
-			for spi.GetCMD_USR() != 0 {
-			}
-			// Small delay between transmissions
-			for j := 0; j < 10000; j++ {
-			}
-		}
-		println(name, "10 transmissions completed - SCK should be visible")
-	} else {
-		println(name, "ERROR: Transmission too fast (0 cycles) - no SCK generated")
-	}
-}
+//go:extern _tinygo_vectors_present
+var _tinygo_vectors_present [0]byte

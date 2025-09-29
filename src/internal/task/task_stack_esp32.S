@@ -1,9 +1,19 @@
-//go:build tinygo
+//go:build tinygo && esp32 && !esp32s3
 
 .section .text.tinygo_startTask,"ax",@progbits
 .global  tinygo_startTask
 .type    tinygo_startTask, %function
 tinygo_startTask:
+    // mark: entered tinygo_startTask
+    movi a2, 0x53544152  // 'STAR'
+    call0  debugMark
+    // Now that we're on the new task stack, restore original PS
+    // to re-enable interrupts at the previous level.
+    rsr.ps  a4
+    movi    a5, 0xFFFFFFF0
+    and     a4, a4, a5        // clear INTLEVEL bits [3:0]
+    wsr.ps  a4
+    rsync
     // Small assembly stub for starting a goroutine. This already runs on the
     // new stack, control reaches this function after returning from the initial
     // tinygo_swapTask below (the retw.n instruction).
@@ -41,10 +51,19 @@ tinygo_swapTask:
     // extra at the bottom to adhere to the ABI.
     entry sp, 32
 
-    // Disable interrupts while flushing registers. This is necessary because
-    // interrupts might want to use the stack pointer (at a2) which will be some
-    // arbitrary register while registers are flushed.
-    rsil a4, 3 // XCHAL_EXCM_LEVEL
+    // mark: entered swapTask
+    movi a2, 0x53574150  // 'SWAP'
+    call0  debugMark
+
+    // Raise INTLEVEL to 15 while flushing register windows to avoid any
+    // interrupt entering with transient SP/register-window state.
+    rsr.ps  a4
+    movi    a5, 0xFFFFFFF0
+    and     a5, a4, a5        // clear INTLEVEL bits [3:0]
+    movi    a6, 0xF
+    or      a5, a5, a6        // set INTLEVEL=15
+    wsr.ps  a5
+    rsync
 
     // Flush all unsaved registers to the stack.
     // This trick has been borrowed from the Zephyr project:
@@ -60,17 +79,13 @@ tinygo_swapTask:
     and a12, a12, a12
     rotw 4
 
-    // Restore interrupts.
-    wsr.ps a4
+    // Keep INTLEVEL=15 across SP switch and retw to avoid races on LX7.
+    // Original PS will be restored (INTLEVEL cleared) in tinygo_startTask.
 
     // At this point, the following is true:
     //     WindowStart == 1 << WindowBase
     // Therefore, we don't need to do this manually.
     // It also means that the stack pointer can now be safely modified.
-
-    // Save a0, which stores the return address and the parent register window
-    // in the upper two bits.
-    s32i.n a0, sp, 0
 
     // Save the current stack pointer in oldStack.
     s32i.n  sp, a3, 0
@@ -78,11 +93,18 @@ tinygo_swapTask:
     // Switch to the new stack pointer (newStack).
     mov.n   sp, a2
 
-    // Load a0, which is the previous return address from before the previous
-    // switch or the constructed return address to tinygo_startTask. This
-    // register also stores the parent register window.
-    l32i.n a0, sp, 0
+    // Ensure underflow vector (_WindowUnderflow4) can restore a0..a3 from
+    // [a5-16..-4]. Our archInit sets:
+    //   r.a0 at (sp-16), r.a1 at (sp-12), r.a2 at (sp-8), r.a3 at (sp-4)
+    // but r.locals[0] (at sp+0) holds the disguised return address for a0.
+    // Copy locals[0] (sp+0) into the a0 slot (sp-16) expected by vector.
+    l32i.n  a4, sp, 0        // a4 = *(sp+0) locals[0]
+    addi    a5, sp, -16
+    s32i    a4, a5, 0        // store into (sp-16)
 
     // Return into the new stack. This instruction will trigger a window
     // underflow, reloading the saved registers from the stack.
+    // mark: about to retw
+    movi a2, 0x52545700  // 'RTW\0'
+    call0  debugMark
     retw.n

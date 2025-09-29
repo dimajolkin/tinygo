@@ -39,8 +39,11 @@ func taskExit() {
 
 // initialize the state and prepare to call the specified function with the specified argument bundle.
 func (s *state) initialize(fn uintptr, args unsafe.Pointer, stackSize uintptr) {
+	println("DEBUG: task.initialize() called, fn =", fn, "stackSize =", stackSize)
+
 	// Create a stack.
 	stack := runtime_alloc(stackSize, nil)
+	println("DEBUG: task.initialize() allocated stack at", stack)
 
 	// Set up the stack canary, a random number that should be checked when
 	// switching from the task back to the scheduler. The stack canary pointer
@@ -48,15 +51,19 @@ func (s *state) initialize(fn uintptr, args unsafe.Pointer, stackSize uintptr) {
 	// the next stack switch, there was a stack overflow.
 	s.canaryPtr = (*uintptr)(stack)
 	*s.canaryPtr = stackCanary
+	println("DEBUG: task.initialize() set canary at", s.canaryPtr, "value =", *s.canaryPtr)
 
 	// Get a pointer to the top of the stack, where the initial register values
 	// are stored. They will be popped off the stack on the first stack switch
 	// to the goroutine, and will start running tinygo_startTask (this setup
 	// happens in archInit).
 	r := (*calleeSavedRegs)(unsafe.Add(stack, stackSize-unsafe.Sizeof(calleeSavedRegs{})))
+	println("DEBUG: task.initialize() calleeSavedRegs at", r)
 
 	// Invoke architecture-specific initialization.
+	println("DEBUG: task.initialize() calling archInit...")
 	s.archInit(r, fn, args)
+	println("DEBUG: task.initialize() archInit completed, s.sp =", s.sp)
 }
 
 //export tinygo_swapTask

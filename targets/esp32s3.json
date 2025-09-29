@@ -21,7 +21,9 @@
 	],
 	"extra-files": [
 		"src/device/esp/esp32s3.S",
-		"src/internal/task/task_stack_esp32.S"
+		"src/internal/task/context_xtensa.S",
+		"src/internal/task/task_stack_xtensa.S",
+		"src/device/esp/esp32s3_vectors.S"
 	],
 	"binary-format": "esp32s3",
 	"flash-command": "esptool.py --chip=esp32s3 --port {port} write_flash 0x00 {bin} -ff 80m -fm dout",
