@@ -4,7 +4,9 @@ package machine
 
 import (
 	"device/esp"
+	"runtime/interrupt"
 	"runtime/volatile"
+	"sync"
 	"unsafe"
 )
 
@@ -80,6 +82,22 @@ const (
 	GPIO45 Pin = 45
 	GPIO46 Pin = 46
 	GPIO48 Pin = 48
+)
+
+// Interrupt constants for ESP32-S3
+const (
+	maxPin              = 49 // ESP32-S3 has GPIO0-GPIO48 (GPIO20, GPIO24, GPIO28-31, GPIO47 не существуют)
+	cpuInterruptFromPin = 19 // Возвращаемся к CPU interrupt 19
+)
+
+// PinChange represents a pin change interrupt trigger type
+type PinChange uint8
+
+// Pin change interrupt constants for SetInterrupt
+const (
+	PinRising PinChange = iota + 1
+	PinFalling
+	PinToggle
 )
 
 // Configure this pin with the given configuration.
@@ -237,4 +255,87 @@ func (p Pin) Get() bool {
 	} else {
 		return esp.GPIO.IN1.Get()&(1<<(p-32)) != 0
 	}
+}
+
+// SetInterrupt sets an interrupt to be executed when a particular pin changes
+// state. The pin should already be configured as an input, including a pull up
+// or down if no external pull is provided.
+//
+// You can pass a nil func to unset the pin change interrupt. If you do so,
+// the change parameter is ignored and can be set to any value (such as 0).
+// If the pin is already configured with a callback, you must first unset
+// this pins interrupt before you can set a new callback.
+func (p Pin) SetInterrupt(change PinChange, callback func(Pin)) error {
+	if p >= maxPin {
+		return ErrInvalidInputPin
+	}
+
+	if callback == nil {
+		// Disable this pin interrupt
+		p.pin().ClearBits(esp.GPIO_PIN_INT_TYPE_Msk | esp.GPIO_PIN_INT_ENA_Msk)
+
+		if pinCallbacks[p] != nil {
+			pinCallbacks[p] = nil
+		}
+		return nil
+	}
+
+	if pinCallbacks[p] != nil {
+		// The pin was already configured.
+		// To properly re-configure a pin, unset it first and set a new
+		// configuration.
+		return ErrNoPinChangeChannel
+	}
+	pinCallbacks[p] = callback
+
+	onceSetupPinInterrupt.Do(func() {
+		setupPinInterrupt()
+	})
+
+	p.pin().Set(
+		(p.pin().Get() & ^uint32(esp.GPIO_PIN_INT_TYPE_Msk|esp.GPIO_PIN_INT_ENA_Msk)) |
+			uint32(change)<<esp.GPIO_PIN_INT_TYPE_Pos | uint32(1)<<esp.GPIO_PIN_INT_ENA_Pos)
+
+	return nil
+}
+
+// pin returns the PIN register corresponding to the given GPIO pin.
+func (p Pin) pin() *volatile.Register32 {
+	return (*volatile.Register32)(unsafe.Add(unsafe.Pointer(&esp.GPIO.PIN0), uintptr(p)*4))
+}
+
+var (
+	pinCallbacks          [maxPin]func(Pin)
+	onceSetupPinInterrupt sync.Once
+)
+
+func setupPinInterrupt() {
+	// Map GPIO interrupt to CPU interrupt level 19
+	esp.INTERRUPT_CORE0.GPIO_INTERRUPT_PRO_MAP.Set(cpuInterruptFromPin)
+	irq := interrupt.New(cpuInterruptFromPin, gpioHandleInterrupt)
+	_ = irq.Enable()
+}
+
+func gpioHandleInterrupt(intr interrupt.Interrupt) {
+	// Прочитать статус GPIO прерываний
+	status := esp.GPIO.STATUS.Get()
+	status1 := esp.GPIO.STATUS1.Get()
+
+	// Обработать GPIO 0-31
+	for i, mask := 0, uint32(1); i < 32; i, mask = i+1, mask<<1 {
+		if (status&mask) != 0 && pinCallbacks[i] != nil {
+			pinCallbacks[i](Pin(i))
+		}
+	}
+
+	// Обработать GPIO 32-48
+	for i, mask := 32, uint32(1); i < maxPin; i, mask = i+1, mask<<1 {
+		if (status1&mask) != 0 && pinCallbacks[i] != nil {
+			pinCallbacks[i](Pin(i))
+		}
+	}
+
+	// Очистить флаги прерывания
+	esp.GPIO.STATUS_W1TC.SetBits(status)
+	esp.GPIO.STATUS1_W1TC.SetBits(status1)
 }

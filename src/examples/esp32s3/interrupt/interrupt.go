@@ -2,95 +2,74 @@ package main
 
 import (
 	"machine"
-	"runtime/interrupt"
 	"time"
 )
 
 var (
-	// GPIO0 - boot button на ESP32-S3
-	button = machine.GPIO0
-	led    = machine.GPIO42
+	// Используем встроенную кнопку и LED для ESP32-S3
+	button = machine.GPIO0  // Boot button (GPIO0) - стандартная кнопка на ESP32-S3
+	led    = machine.GPIO42 // RGB LED (GPIO48) - обычно используется для RGB LED
 
-	// Счетчики для демонстрации
-	interruptCount  uint32 = 0
-	lastButtonState bool   = true // true = не нажата (подтяжка вверх)
+	// Альтернативные пины для разных плат ESP32-S3:
+	// button = machine.GPIO1   // Требует внешнюю подтяжку +3.3V через резистор 10кОм
+	// button = machine.GPIO9   // Если GPIO0 не работает
+	// led    = machine.GPIO2   // Стандартный LED на некоторых платах
+	// led    = machine.GPIO38  // RGB LED на других платах
+
+	// Счетчик нажатий
+	pressCount int64 = 0
 )
 
 func main() {
-	println("=== ESP32-S3 Low-Level Interrupt Example ===")
-
-	// Настройка GPIO пинов
+	println("Start app!")
+	// Настраиваем пины
 	button.Configure(machine.PinConfig{Mode: machine.PinInputPullup})
 	led.Configure(machine.PinConfig{Mode: machine.PinOutput})
-	led.Low() // Изначально LED выключен
+	led.High()
 
-	println("GPIO настроены...")
+	println("Init..")
+	// Устанавливаем прерывание на кнопку
+	err := button.SetInterrupt(machine.PinFalling, handleButtonPress)
+	if err != nil {
+		println("Error setting interrupt:", err.Error())
+	}
 
-	// Регистрируем новый обработчик прерывания (шаг 1)
-	// Это TinyGo способ сказать компилятору, что функция handleGPIOInterrupt
-	// особенная и должна вызываться при срабатывании GPIO прерывания
+	println("ESP32-S3 Interrupt Example")
+	println("Press the boot button (GPIO0) to toggle LED")
+	println("Starting main loop...")
 
-	// Для ESP32-S3 используем GPIO interrupt
-	// IRQ_GPIO для ESP32-S3 обычно имеет номер 22 (ETS_GPIO_INTR_SOURCE)
-	//intr := interrupt.New(22, handleGPIOInterrupt) // IRQ 22 для GPIO на ESP32-S3
-
-	println("Прерывание зарегистрировано...")
-
-	// Теперь у нас есть дескриптор прерывания. По умолчанию на этом чипе
-	// установлен максимально возможный приоритет. Мы хотели бы установить
-	// GPIO на более низкий приоритет, что мы и делаем здесь.
-	// Магическая константа здесь в будущих версиях будет заменена
-	// обычной константой для низкоприоритетного прерывания.
-	//intr.SetPriority(0xc0) // Низкий приоритет
-
-	println("Приоритет установлен...")
-
-	// Наконец, прерывание должно быть включено. Без этого прерывание
-	// все еще будет срабатывать, но обработчик никогда не будет вызван.
-	//intr.Enable()
-
-	println("Прерывание включено!")
-	println("Нажимайте кнопку GPIO0 (boot button)")
-	println("LED будет мигать при каждом нажатии")
-	println()
-
-	// Основной цикл программы
+	// Основной цикл - мигаем LED медленно
 	counter := 0
 	for {
 		counter++
+		println("Loop iteration:", counter, "- LED High")
+		led.High()
 
-		// Показываем, что основная программа работает
-		if counter%10 == 0 {
-			println("Основной цикл работает... Счетчик прерываний:", interruptCount)
+		println("About to sleep 500ms...")
+		time.Sleep(500 * time.Millisecond)
+		println("Sleep 1 completed")
+
+		println("Loop iteration:", counter, "- LED Low")
+		led.Low()
+
+		println("About to sleep 500ms again...")
+		time.Sleep(500 * time.Millisecond)
+		println("Sleep 2 completed")
+
+		println("tick - iteration", counter, "completed")
+
+		if !button.Get() {
+			println("Button Pressed")
 		}
-
-		// Проверяем состояние кнопки (polling для сравнения)
-		currentState := button.Get()
-		if currentState != lastButtonState {
-			if !currentState { // Кнопка нажата (LOW из-за pullup)
-				println("Кнопка нажата (polling detection)")
-			}
-			lastButtonState = currentState
+		// Выводим количество нажатий каждые 2 секунды
+		if pressCount > 0 {
+			println("Button pressed", pressCount, "times")
+			break
 		}
-
-		time.Sleep(100 * time.Millisecond)
 	}
 }
 
-// Обработчик низкоуровневого GPIO прерывания
-// Эта функция будет вызываться аппаратно при изменении состояния GPIO0
-func handleGPIOInterrupt(intr interrupt.Interrupt) {
-	// ВАЖНО: В обработчике прерывания нужно быть очень осторожным
-	// - Не использовать println (может вызвать deadlock)
-	// - Минимизировать время выполнения
-	// - Избегать блокирующих операций
-
-	// Увеличиваем счетчик прерываний
-	interruptCount++
-
-	// Быстро мигаем LED для индикации прерывания
-	led.High()
-
-	// В реальном коде здесь бы была минимальная обработка
-	// и установка флагов для основного цикла
+// Обработчик прерывания от кнопки
+func handleButtonPress(pin machine.Pin) {
+	pressCount++
 }
