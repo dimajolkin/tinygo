@@ -74,6 +74,9 @@ func main() {
 	// Initialize system tick using SYSTIMER (10ms period)
 	initSystimerTick()
 
+	// Configure GPIO36 as debug output (toggled by SYSTIMER ISR)
+	initDebugPin41()
+
 	for i := 0; i < 10000; i++ {
 		print(".")
 	}
@@ -136,8 +139,6 @@ func initTimer() {
 	esp.TIMG0.SetT0CONFIG_INCREASE(1)   // Count up
 	esp.TIMG0.SetT0CONFIG_AUTORELOAD(0) // No auto-reload
 	esp.TIMG0.SetT0CONFIG_EN(1)         // Enable timer
-
-	print("initTimer(): Timer configured and enabled\n")
 }
 
 func ticks() timeUnit {
@@ -289,4 +290,31 @@ func systimerHandleInterrupt(intr interrupt.Interrupt) {
 	// Clear interrupt status
 	esp.SYSTIMER.INT_CLR.Set(1 << 0)
 	// In periodic mode hardware should auto-schedule next target; nothing else needed here.
+
+	// Debug: toggle GPIO36 every 10 ticks (~100ms) to verify ISR execution
+	systimerTickCount++
+	if systimerTickCount%10 == 0 {
+		if gpio41State == 0 {
+			debugPin.High()
+			gpio41State = 1
+		} else {
+			debugPin.Low()
+			gpio41State = 0
+		}
+	}
+}
+
+// systimer debug pin state/counter (toggled every 10 ticks => 100ms)
+var (
+	systimerTickCount uint32
+	gpio41State       uint8
+	debugPin          machine.Pin
+)
+
+// initDebugPin41 configures GPIO41 as push-pull output and sets it low.
+func initDebugPin41() {
+	debugPin = machine.Pin(41)
+	debugPin.Configure(machine.PinConfig{Mode: machine.PinOutput})
+	debugPin.Low()
+	gpio41State = 0
 }

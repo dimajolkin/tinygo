@@ -7,6 +7,18 @@ import (
 	"errors"
 )
 
+// readINTENABLE returns current CPU interrupt enable mask.
+func readINTENABLE() uint32 {
+	v := device.AsmFull("rsr.intenable {}", nil)
+	return uint32(v)
+}
+
+// writeINTENABLE writes CPU interrupt enable mask and rsyncs.
+func writeINTENABLE(mask uint32) {
+	device.AsmFull("wsr {v}, INTENABLE", map[string]interface{}{"v": uintptr(mask)})
+	device.AsmFull("rsync", nil)
+}
+
 // Enable enables this interrupt for ESP32-S3.
 // For ESP32-S3, we enable interrupts globally at the Xtensa level.
 func (i Interrupt) Enable() error {
@@ -14,23 +26,17 @@ func (i Interrupt) Enable() error {
 		return errors.New("interrupt for ESP32-S3 must be in range of 1 through 31")
 	}
 
-	println("DEBUG: Enabling interrupt", i.num)
-
 	// Disable interrupts temporarily to avoid race conditions
 	mask := Disable()
 	defer Restore(mask)
 
 	// Read current PS register value
-	println("DEBUG: Reading current PS register...")
 	psValue := uintptr(device.AsmFull("rsr.ps {}", nil))
-	println("DEBUG: Current PS value =", psValue)
 
 	// Clear INTLEVEL bits [3:0] to 0 to allow all interrupts
 	// PS_INTLEVEL_MASK is 0x0000000F
 	const PS_INTLEVEL_MASK = 0x0F
 	psValue = psValue & ^uintptr(PS_INTLEVEL_MASK)
-
-	println("DEBUG: New PS value (INTLEVEL=0) =", psValue)
 
 	// Write modified PS register back
 	device.AsmFull("wsr {ps}, PS", map[string]interface{}{
@@ -38,15 +44,23 @@ func (i Interrupt) Enable() error {
 	})
 	device.AsmFull("rsync", nil)
 
-	println("DEBUG: Interrupt", i.num, "enabled successfully")
+	// Enable this CPU interrupt line in INTENABLE
+	m := readINTENABLE()
+	m |= (1 << uint(i.num))
+	writeINTENABLE(m)
+
 	return nil
 }
 
 // Disable disables this interrupt.
 func (i Interrupt) Disable() {
-	// For Xtensa, interrupt disabling is managed globally through the PS.INTLEVEL field
-	// Individual interrupt disabling would require access to INTENABLE register
-	// which is managed at a different level
+	if i.num < 1 || i.num > 31 {
+		return
+	}
+	// Clear this CPU interrupt line in INTENABLE
+	m := readINTENABLE()
+	m &^= (1 << uint(i.num))
+	writeINTENABLE(m)
 }
 
 // SetPriority sets the interrupt priority for this interrupt.
