@@ -80,7 +80,7 @@ func main() {
 	initSystimerTick()
 
 	// Configure GPIO41 as debug output (toggled by SYSTIMER ISR)
-	initDebugPin41()
+	//initDebugPin41()
 
 	// One-shot: if SYSTIMER already asserted, raise pin and clear flag
 	//if (esp.SYSTIMER.INT_ST.Get() & 1) != 0 {
@@ -90,7 +90,7 @@ func main() {
 	//}
 
 	// Force PS.INTLEVEL = 0 to allow IRQs and dump state
-	setPSIntLevel(0)
+	//setPSIntLevel(0)
 	dumpSystimerDebug("after initSystimerTick")
 
 	// Background: reflect ISR tick counter to GPIO41 without touching ISR

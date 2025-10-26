@@ -50,6 +50,11 @@ call_start_cpu0:
     wsr.cpenable a2
     rsync
 
+    // Set VECBASE to vector table base placed by linker in IRAM
+    movi a2, _vector_base
+    wsr.vecbase a2
+    rsync
+
     // Jump to the runtime start function written in Go.
     call4 main
 

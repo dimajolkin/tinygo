@@ -55,7 +55,8 @@ _frxt_int_enter:
     
     // Вычесть 1 из уровня для разрешения более высоких
     addi    a2, a2, -1
-    andi    a2, a2, 0xF         // Обезопасить (0-7 уровни)
+    movi    a4, 0xF
+    and     a2, a2, a4          // Обезопасить (0-7 уровни)
     
     // Объединить новый уровень с PS
     or      a3, a3, a2
@@ -149,12 +150,12 @@ _xt_level1_int_handler:
     
     // Вызвать Go функцию обработчика
     movi    a2, 1               // a2 = уровень прерывания (1)
-    call    _frxt_int_enter     // Вход в обработчик
+    call4   _frxt_int_enter     // Вход в обработчик
     
     // Вызвать основной обработчик (Go код)
-    call    handleInterrupt
+    call4   handleInterrupt
     
-    call    _frxt_int_exit      // Выход из обработчика
+    call4   _frxt_int_exit      // Выход из обработчика
     
     // Восстановить минимальный контекст
     l32i    a0, sp, 0
@@ -196,7 +197,7 @@ _xt_level1_int_handler:
 
 _xt_unhandled_exception:
     // Сохранить полный контекст для отладки
-    call    _xt_context_save    // a2 = &контекст
+    call4   _xt_context_save    // a2 = &контекст
     
     // Сохранить указатель на контекст
     mov     a3, a2
@@ -208,7 +209,7 @@ _xt_unhandled_exception:
     
     // Вызвать Go функцию обработчика
     // handleException(exccause uint32, excvaddr uint32, epc uint32)
-    call    handleException
+    call4   handleException
     
     // Если вернулись, зациклиться (halt)
 .exception_halt_loop:
@@ -227,7 +228,8 @@ _xt_unhandled_exception:
 
 _xt_check_interrupt_level:
     rsr.ps  a2
-    andi    a2, a2, PS_INTLEVEL_MASK  // Извлечь INTLEVEL [3:0]
+    movi    a3, PS_INTLEVEL_MASK
+    and     a2, a2, a3                // Извлечь INTLEVEL [3:0]
     ret
 
 /*

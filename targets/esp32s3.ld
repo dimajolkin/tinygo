@@ -19,6 +19,24 @@ ENTRY(call_start_cpu0)
 
 SECTIONS
 {
+    /* Interrupt/Exception vectors placed in IRAM at a 0x400-aligned base. */
+    .vectors : ALIGN(0x400)
+    {
+        _vector_base = .;
+
+        /* Each vector is 0x20 bytes apart, keep order and fixed offsets */
+        . = _vector_base + 0x000; KEEP(*(.UserExceptionVector.text))
+        . = _vector_base + 0x020; KEEP(*(.DoubleExceptionVector.text))
+        . = _vector_base + 0x040; KEEP(*(.KernelExceptionVector.text))
+        . = _vector_base + 0x060; KEEP(*(.NMIExceptionVector.text))
+        . = _vector_base + 0x080; KEEP(*(.Level2InterruptVector.text))
+        . = _vector_base + 0x0A0; KEEP(*(.Level3InterruptVector.text))
+        . = _vector_base + 0x0C0; KEEP(*(.Level4InterruptVector.text))
+        . = _vector_base + 0x0E0; KEEP(*(.Level5InterruptVector.text))
+        . = _vector_base + 0x100; KEEP(*(.Level6InterruptVector.text))
+        . = _vector_base + 0x120; KEEP(*(.Level7InterruptVector.text))
+    } >IRAM
+
     /* Constant literals and code. Loaded into IRAM for now. Eventually, most
      * code should be executed directly from flash.
      * Note that literals must be before code for the l32r instruction to work.

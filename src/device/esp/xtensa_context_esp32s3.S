@@ -221,7 +221,8 @@ _xt_context_restore_and_return:
 _xt_check_context_alignment:
     // Проверить выравнивание на 16 байт
     // Маска для проверки нижних 4 бит (16 = 2^4)
-    andi    a2, a2, 0xF
+    movi    a3, 0xF
+    and     a2, a2, a3
     
     // Если a2 == 0, то выровнено
     movi    a3, 0
