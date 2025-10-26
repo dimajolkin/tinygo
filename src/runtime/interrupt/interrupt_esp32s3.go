@@ -14,18 +14,31 @@ func (i Interrupt) Enable() error {
 		return errors.New("interrupt for ESP32-S3 must be in range of 1 through 31")
 	}
 
+	println("DEBUG: Enabling interrupt", i.num)
+
 	// Disable interrupts temporarily to avoid race conditions
 	mask := Disable()
 	defer Restore(mask)
 
-	// Set interrupt level to 0 (allow all interrupts) by writing to PS register
-	// This is the minimum needed to enable interrupts globally
-	state := uintptr(0)
-	device.AsmFull("wsr {state}, PS", map[string]interface{}{
-		"state": state,
+	// Read current PS register value
+	println("DEBUG: Reading current PS register...")
+	psValue := uintptr(device.AsmFull("rsr.ps {}", nil))
+	println("DEBUG: Current PS value =", psValue)
+
+	// Clear INTLEVEL bits [3:0] to 0 to allow all interrupts
+	// PS_INTLEVEL_MASK is 0x0000000F
+	const PS_INTLEVEL_MASK = 0x0F
+	psValue = psValue & ^uintptr(PS_INTLEVEL_MASK)
+
+	println("DEBUG: New PS value (INTLEVEL=0) =", psValue)
+
+	// Write modified PS register back
+	device.AsmFull("wsr {ps}, PS", map[string]interface{}{
+		"ps": psValue,
 	})
 	device.AsmFull("rsync", nil)
 
+	println("DEBUG: Interrupt", i.num, "enabled successfully")
 	return nil
 }
 

@@ -270,8 +270,11 @@ func (p Pin) SetInterrupt(change PinChange, callback func(Pin)) error {
 		return ErrInvalidInputPin
 	}
 
+	println("DEBUG: SetInterrupt called for GPIO", p, "change=", change)
+
 	if callback == nil {
 		// Disable this pin interrupt
+		println("DEBUG: Disabling interrupt for GPIO", p)
 		p.pin().ClearBits(esp.GPIO_PIN_INT_TYPE_Msk | esp.GPIO_PIN_INT_ENA_Msk)
 
 		if pinCallbacks[p] != nil {
@@ -284,18 +287,37 @@ func (p Pin) SetInterrupt(change PinChange, callback func(Pin)) error {
 		// The pin was already configured.
 		// To properly re-configure a pin, unset it first and set a new
 		// configuration.
+		println("DEBUG: Pin", p, "already has a callback")
 		return ErrNoPinChangeChannel
 	}
 	pinCallbacks[p] = callback
+	println("DEBUG: Callback registered for GPIO", p)
 
+	var err error
 	onceSetupPinInterrupt.Do(func() {
-		setupPinInterrupt()
+		err = setupPinInterrupt()
 	})
+	if err != nil {
+		pinCallbacks[p] = nil // rollback
+		return err
+	}
+
+	println("DEBUG: Setting PIN INT_TYPE and INT_ENA for GPIO", p)
+
+	// Read current PIN register value
+	pinRegBefore := p.pin().Get()
+	println("DEBUG: PIN register BEFORE =", pinRegBefore)
 
 	p.pin().Set(
 		(p.pin().Get() & ^uint32(esp.GPIO_PIN_INT_TYPE_Msk|esp.GPIO_PIN_INT_ENA_Msk)) |
 			uint32(change)<<esp.GPIO_PIN_INT_TYPE_Pos | uint32(1)<<esp.GPIO_PIN_INT_ENA_Pos)
 
+	pinRegAfter := p.pin().Get()
+	println("DEBUG: PIN register AFTER =", pinRegAfter)
+	println("DEBUG: INT_TYPE bits (should have bits set) =", (pinRegAfter&esp.GPIO_PIN_INT_TYPE_Msk)>>esp.GPIO_PIN_INT_TYPE_Pos)
+	println("DEBUG: INT_ENA bits (should have bits set) =", (pinRegAfter&esp.GPIO_PIN_INT_ENA_Msk)>>esp.GPIO_PIN_INT_ENA_Pos)
+
+	println("DEBUG: SetInterrupt complete for GPIO", p)
 	return nil
 }
 
@@ -309,33 +331,70 @@ var (
 	onceSetupPinInterrupt sync.Once
 )
 
-func setupPinInterrupt() {
+func setupPinInterrupt() error {
 	// Map GPIO interrupt to CPU interrupt level 19
+	println("DEBUG: Setting up GPIO interrupt...")
+	println("DEBUG: Mapping GPIO interrupt to CPU interrupt", cpuInterruptFromPin)
 	esp.INTERRUPT_CORE0.GPIO_INTERRUPT_PRO_MAP.Set(cpuInterruptFromPin)
+	println("DEBUG: GPIO_INTERRUPT_PRO_MAP set to", cpuInterruptFromPin)
+
 	irq := interrupt.New(cpuInterruptFromPin, gpioHandleInterrupt)
-	_ = irq.Enable()
+	println("DEBUG: interrupt.New created, calling Enable()...")
+	err := irq.Enable()
+	if err != nil {
+		println("DEBUG: ERROR enabling interrupt:", err.Error())
+		return err
+	}
+	println("DEBUG: GPIO interrupt setup complete")
+	return nil
 }
 
 func gpioHandleInterrupt(intr interrupt.Interrupt) {
+	println("DEBUG: gpioHandleInterrupt called!")
+
 	// Прочитать статус GPIO прерываний
 	status := esp.GPIO.STATUS.Get()
 	status1 := esp.GPIO.STATUS1.Get()
 
+	println("DEBUG: GPIO.STATUS =", status)
+	println("DEBUG: GPIO.STATUS1 =", status1)
+
+	if status == 0 && status1 == 0 {
+		println("DEBUG: WARNING - both STATUS registers are 0!")
+		println("DEBUG: Checking GPIO interrupt enable status...")
+		// Check if interrupts are enabled in INTERRUPT_CORE0
+		println("DEBUG: GPIO_INTERRUPT_PRO_MAP =", esp.INTERRUPT_CORE0.GPIO_INTERRUPT_PRO_MAP.Get())
+		return
+	}
+
 	// Обработать GPIO 0-31
 	for i, mask := 0, uint32(1); i < 32; i, mask = i+1, mask<<1 {
-		if (status&mask) != 0 && pinCallbacks[i] != nil {
-			pinCallbacks[i](Pin(i))
+		if (status & mask) != 0 {
+			println("DEBUG: GPIO", i, "interrupt active, mask=", mask)
+			if pinCallbacks[i] != nil {
+				println("DEBUG: Calling callback for GPIO", i)
+				pinCallbacks[i](Pin(i))
+			} else {
+				println("DEBUG: No callback for GPIO", i)
+			}
 		}
 	}
 
 	// Обработать GPIO 32-48
+	// STATUS1 содержит статус для GPIO32 и выше
 	for i, mask := 32, uint32(1); i < maxPin; i, mask = i+1, mask<<1 {
-		if (status1&mask) != 0 && pinCallbacks[i] != nil {
-			pinCallbacks[i](Pin(i))
+		if (status1 & mask) != 0 {
+			println("DEBUG: GPIO", i, "interrupt active in STATUS1, mask=", mask)
+			if pinCallbacks[i] != nil {
+				println("DEBUG: Calling callback for GPIO", i)
+				pinCallbacks[i](Pin(i))
+			}
 		}
 	}
 
 	// Очистить флаги прерывания
+	println("DEBUG: Clearing interrupt flags...")
 	esp.GPIO.STATUS_W1TC.SetBits(status)
 	esp.GPIO.STATUS1_W1TC.SetBits(status1)
+	println("DEBUG: gpioHandleInterrupt complete")
 }

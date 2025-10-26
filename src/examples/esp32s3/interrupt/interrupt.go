@@ -32,7 +32,9 @@ func main() {
 	err := button.SetInterrupt(machine.PinFalling, handleButtonPress)
 	if err != nil {
 		println("Error setting interrupt:", err.Error())
+		return
 	}
+	println("✓ Interrupt registered successfully")
 
 	println("ESP32-S3 Interrupt Example")
 	println("Press the boot button (GPIO0) to toggle LED")
@@ -42,7 +44,7 @@ func main() {
 	counter := 0
 	for {
 		counter++
-		println("Loop iteration:", counter, "- LED High")
+		println("Loop iteration:", counter, "- LED High, pressCount=", pressCount)
 		led.High()
 
 		println("About to sleep 500ms...")
