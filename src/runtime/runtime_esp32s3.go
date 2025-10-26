@@ -87,13 +87,6 @@ func main() {
 	// Configure GPIO41 as debug output (toggled by SYSTIMER ISR)
 	initDebugPin41()
 
-	// One-shot: if SYSTIMER already asserted, raise pin and clear flag
-	if (esp.SYSTIMER.INT_ST.Get() & 1) != 0 {
-		debugPin.High()
-		println("SYST one-shot: TARGET0 asserted")
-		esp.SYSTIMER.INT_CLR.Set(1 << 0)
-	}
-
 	// Force PS.INTLEVEL = 0 to allow IRQs and dump state
 	setPSIntLevel(0)
 	dumpSystimerDebug("after initSystimerTick")
@@ -361,12 +354,24 @@ func initSystimerTick() {
 		println("SYST step8 skipped isr registration (debug)")
 	}
 
+	// Program first shot: latch UNIT0, set TARGET0 = now + period, load, enable INT
+	esp.SYSTIMER.SetUNIT0_OP_TIMER_UNIT0_UPDATE(1)
+	// read latched now (low then hi)
+	nowLo := esp.SYSTIMER.UNIT0_VALUE_LO.Get()
+	nowHi := esp.SYSTIMER.UNIT0_VALUE_HI.Get()
+	// compute target = now + periodTicks
+	tgtLo := nowLo + periodTicks
+	tgtHi := nowHi
+	if tgtLo < nowLo {
+		tgtHi++
+	}
+	esp.SYSTIMER.SetTARGET0_LO(tgtLo)
+	esp.SYSTIMER.SetREAL_TARGET0_HI_TARGET0_HI_RO(tgtHi & 0xFFFFF)
+	esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1)
 	// Clear any pending status and enable SYSTIMER interrupt bit
 	esp.SYSTIMER.INT_CLR.Set(1 << 0)
-	println("SYST after CLR: INT_ST=", esp.SYSTIMER.INT_ST.Get())
 	esp.SYSTIMER.INT_ENA.SetBits(1 << 0)
-	println("SYST after ENA: INT_ENA=", esp.SYSTIMER.INT_ENA.Get())
-	println("SYST step9 int ena + clr")
+	println("SYST step9 armed first shot: nowHI=", nowHi, " nowLO=", nowLo, " tgtHI=", tgtHi, " tgtLO=", tgtLo)
 
 	// Arm periodic alarm
 	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(1)
