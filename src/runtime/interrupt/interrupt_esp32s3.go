@@ -30,20 +30,6 @@ func (i Interrupt) Enable() error {
 	mask := Disable()
 	defer Restore(mask)
 
-	// Read current PS register value
-	psValue := uintptr(device.AsmFull("rsr.ps {}", nil))
-
-	// Clear INTLEVEL bits [3:0] to 0 to allow all interrupts
-	// PS_INTLEVEL_MASK is 0x0000000F
-	const PS_INTLEVEL_MASK = 0x0F
-	psValue = psValue & ^uintptr(PS_INTLEVEL_MASK)
-
-	// Write modified PS register back
-	device.AsmFull("wsr {ps}, PS", map[string]interface{}{
-		"ps": psValue,
-	})
-	device.AsmFull("rsync", nil)
-
 	// Enable this CPU interrupt line in INTENABLE
 	m := readINTENABLE()
 	m |= (1 << uint(i.num))

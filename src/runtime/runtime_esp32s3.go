@@ -71,16 +71,42 @@ func main() {
 
 	initTimer()
 
-	// Initialize system tick using SYSTIMER (10ms period)
-	initSystimerTick()
-
-	// Configure GPIO36 as debug output (toggled by SYSTIMER ISR)
-	initDebugPin41()
-
 	for i := 0; i < 10000; i++ {
 		print(".")
 	}
 	print("\n")
+
+	// Initialize system tick using SYSTIMER (10ms period)
+	initSystimerTick()
+
+	// Configure GPIO41 as debug output (toggled by SYSTIMER ISR)
+	initDebugPin41()
+
+	// One-shot: if SYSTIMER already asserted, raise pin and clear flag
+	//if (esp.SYSTIMER.INT_ST.Get() & 1) != 0 {
+	//	debugPin.High()
+	//	println("SYST one-shot: TARGET0 asserted")
+	//	esp.SYSTIMER.INT_CLR.Set(1 << 0)
+	//}
+
+	// Force PS.INTLEVEL = 0 to allow IRQs and dump state
+	setPSIntLevel(0)
+	dumpSystimerDebug("after initSystimerTick")
+
+	// Background: reflect ISR tick counter to GPIO41 without touching ISR
+	var last uint32
+	for {
+		if systimerIRQCount != last {
+			last = systimerIRQCount
+			if gpio41State == 0 {
+				debugPin.High()
+				gpio41State = 1
+			} else {
+				debugPin.Low()
+				gpio41State = 0
+			}
+		}
+	}
 
 	// TEST: Generate 50kHz signal on GPIO36 for debugging
 	// testGPIO36_50kHz()
@@ -250,58 +276,105 @@ var _sbss [0]byte
 //go:extern _ebss
 var _ebss [0]byte
 
+// setPSIntLevel sets PS.INTLEVEL to the given level (0..15)
+func setPSIntLevel(level int) {
+	ps := device.AsmFull("rsr.ps {}", nil)
+	ps &^= 0x0F
+	ps |= uintptr(level & 0x0F)
+	device.AsmFull("wsr {v}, PS", map[string]interface{}{"v": ps})
+	device.AsmFull("rsync", nil)
+}
+
+// dumpSystimerDebug prints key SYSTIMER/CPU interrupt state
+func dumpSystimerDebug(tag string) {
+	mapVal := esp.INTERRUPT_CORE0.GetSYSTIMER_TARGET0_INT_MAP()
+	intEna := device.AsmFull("rsr.intenable {}", nil)
+	ps := device.AsmFull("rsr.ps {}", nil)
+	st := esp.SYSTIMER.INT_ST.Get()
+	ena := esp.SYSTIMER.INT_ENA.Get()
+	conf := esp.SYSTIMER.CONF.Get()
+	t0conf := esp.SYSTIMER.TARGET0_CONF.Get()
+	now := esp.SYSTIMER.UNIT0_VALUE_LO.Get()
+	tgt := esp.SYSTIMER.TARGET0_LO.Get()
+	nowHi := esp.SYSTIMER.UNIT0_VALUE_HI.Get()
+	tgtHi := esp.SYSTIMER.REAL_TARGET0_HI.Get()
+	println("-- SYSTIMER DEBUG (", tag, ") --")
+	println("MAP=", mapVal, " INTENABLE=", uint32(intEna), " PS=", uint32(uintptr(ps)&0x0F))
+	println("SYSTIMER: INT_ST=", st, " INT_ENA=", ena, " CONF=", conf, " T0CONF=", t0conf)
+	println("UNIT0_HI=", nowHi, " UNIT0_LO=", now, " TARGET0_HI=", tgtHi, " TARGET0_LO=", tgt)
+}
+
 // initSystimerTick configures SYSTIMER TARGET0 to generate periodic interrupts every 10ms
 // and routes it to a CPU interrupt channel via the Interrupt Matrix.
 func initSystimerTick() {
 	const systimerClockHz = 80_000_000 // assumed SYSTIMER clock
 	const tickPeriodNs = 10_000_000    // 10ms
-	const cpuInterruptForSystimer = 20 // CPU interrupt channel (avoid conflicts with GPIO=19)
+	const cpuInterruptForSystimer = 20 // avoid conflict: 19 is used by GPIO
+	const debugSkipISRRegistration = false
 
 	// Compute period in timer ticks: ticks = Freq * period
 	periodTicks := uint32((systimerClockHz * tickPeriodNs) / 1_000_000_000)
 	if periodTicks == 0 {
 		periodTicks = 1
 	}
+	println("SYST step1 periodTicks=", periodTicks)
+
+	// Temporarily block interrupts during configuration
+	setPSIntLevel(15)
+	println("SYST step2 mask IRQs (PS=15)")
 
 	// Map SYSTIMER TARGET0 to selected CPU interrupt channel on core0
 	esp.INTERRUPT_CORE0.SetSYSTIMER_TARGET0_INT_MAP(cpuInterruptForSystimer)
+	println("SYST step3 map cpuInt=", cpuInterruptForSystimer)
 
-	// Enable SYSTIMER target0 work
-	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(1)
-	// Select UNIT0 for compare and enable periodic mode
-	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_TIMER_UNIT_SEL(0)
+	// Ensure SYSTIMER clocks enabled
+	esp.SYSTIMER.SetCONF_SYSTIMER_CLK_FO(1)
+	esp.SYSTIMER.CONF.Set(esp.SYSTIMER.CONF.Get() | esp.SYSTIMER_CONF_CLK_EN)
+	esp.SYSTIMER.SetCONF_TIMER_UNIT0_WORK_EN(1)
+	esp.SYSTIMER.SetCONF_TIMER_UNIT1_WORK_EN(1)
+	println("SYST step4 clocks on")
+
+	// Configure periodic mode on UNIT1 (commonly used for alarms) and set period
+	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_TIMER_UNIT_SEL(1)
 	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD_MODE(1)
 	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD(periodTicks)
+	// Load comparator configuration (no arm yet)
+	esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1)
+	println("SYST step5 cfg period + comp load")
 
-	// Clear pending and enable interrupt for TARGET0
+	println("SYST step8 before isr registration")
+	if !debugSkipISRRegistration {
+		println("SYST step8.1 calling interrupt.New")
+		irq := interrupt.New(cpuInterruptForSystimer, systimerHandleInterrupt)
+		println("SYST step8.2 after interrupt.New")
+		_ = irq.Enable()
+		println("SYST step8.3 after irq.Enable")
+	} else {
+		println("SYST step8 skipped isr registration (debug)")
+	}
+
+	// Clear any pending status and enable SYSTIMER interrupt bit
 	esp.SYSTIMER.INT_CLR.Set(1 << 0)
 	esp.SYSTIMER.INT_ENA.SetBits(1 << 0)
+	println("SYST step9 int ena + clr")
 
-	// Sync comparator load
-	esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1)
+	// Arm periodic alarm
+	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(1)
+	println("SYST step10 work en")
 
-	// Register ISR and enable CPU interrupt
-	irq := interrupt.New(cpuInterruptForSystimer, systimerHandleInterrupt)
-	_ = irq.Enable()
+	// Unmask interrupts
+	setPSIntLevel(0)
+	println("SYST step11 unmask IRQs (PS=0)")
+
+	// Minimal log
+	println("SYSTIMER tick armed: periodTicks=", periodTicks)
 }
 
 // systimerHandleInterrupt handles SYSTIMER TARGET0 interrupt (10ms tick).
 func systimerHandleInterrupt(intr interrupt.Interrupt) {
-	// Clear interrupt status
+	// Clear interrupt status only and bump counter. Avoid any non-ISR-safe calls.
 	esp.SYSTIMER.INT_CLR.Set(1 << 0)
-	// In periodic mode hardware should auto-schedule next target; nothing else needed here.
-
-	// Debug: toggle GPIO36 every 10 ticks (~100ms) to verify ISR execution
-	systimerTickCount++
-	if systimerTickCount%10 == 0 {
-		if gpio41State == 0 {
-			debugPin.High()
-			gpio41State = 1
-		} else {
-			debugPin.Low()
-			gpio41State = 0
-		}
-	}
+	systimerIRQCount++
 }
 
 // systimer debug pin state/counter (toggled every 10 ticks => 100ms)
@@ -309,6 +382,8 @@ var (
 	systimerTickCount uint32
 	gpio41State       uint8
 	debugPin          machine.Pin
+	systimerIRQSeen   uint32
+	systimerIRQCount  uint32
 )
 
 // initDebugPin41 configures GPIO41 as push-pull output and sets it low.
