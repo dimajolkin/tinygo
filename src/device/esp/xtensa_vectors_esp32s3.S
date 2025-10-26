@@ -9,6 +9,7 @@
  */
 
 .extern _xt_level1_int_handler
+.extern _xt_unhandled_exception
 .extern _frxt_int_depth
 
 /* Provide storage for _frxt_int_depth if not provided elsewhere */
@@ -23,14 +24,12 @@ _frxt_int_depth:
 .align 4
 .global _UserExceptionVector
 _UserExceptionVector:
-    j   _xt_lowint1
+    j       _xt_lowint1
     nop
     nop
     nop
     nop
-    nop
-    nop
-    nop
+    .space (0x20 - (.-_UserExceptionVector))
 
 /* Low-level level-1 interrupt entry: prepare minimal state and branch */
 .section .text._xt_lowint1, "ax", @progbits
@@ -45,46 +44,55 @@ _xt_lowint1:
 .section .DoubleExceptionVector.text, "ax", @progbits
 .align 4
 _DoubleExceptionVector:
-    j   _DoubleExceptionVector
+    j   _xt_unhandled_exception
+    .space (0x20 - (.-_DoubleExceptionVector))
 
 .section .KernelExceptionVector.text, "ax", @progbits
 .align 4
 _KernelExceptionVector:
-    j   _KernelExceptionVector
+    j   _xt_unhandled_exception
+    .space (0x20 - (.-_KernelExceptionVector))
 
 .section .NMIExceptionVector.text, "ax", @progbits
 .align 4
 _NMIExceptionVector:
-    j   _NMIExceptionVector
+    j   _xt_unhandled_exception
+    .space (0x20 - (.-_NMIExceptionVector))
 
 .section .Level2InterruptVector.text, "ax", @progbits
 .align 4
 _Level2InterruptVector:
-    j   _Level2InterruptVector
+    j   _xt_level1_int_handler
+    .space (0x20 - (.-_Level2InterruptVector))
 
 .section .Level3InterruptVector.text, "ax", @progbits
 .align 4
 _Level3InterruptVector:
-    j   _Level3InterruptVector
+    j   _xt_level1_int_handler
+    .space (0x20 - (.-_Level3InterruptVector))
 
 .section .Level4InterruptVector.text, "ax", @progbits
 .align 4
 _Level4InterruptVector:
-    j   _Level4InterruptVector
+    j   _xt_level1_int_handler
+    .space (0x20 - (.-_Level4InterruptVector))
 
 .section .Level5InterruptVector.text, "ax", @progbits
 .align 4
 _Level5InterruptVector:
-    j   _Level5InterruptVector
+    j   _xt_level1_int_handler
+    .space (0x20 - (.-_Level5InterruptVector))
 
 .section .Level6InterruptVector.text, "ax", @progbits
 .align 4
 _Level6InterruptVector:
-    j   _Level6InterruptVector
+    j   _xt_level1_int_handler
+    .space (0x20 - (.-_Level6InterruptVector))
 
 .section .Level7InterruptVector.text, "ax", @progbits
 .align 4
 _Level7InterruptVector:
-    j   _Level7InterruptVector
+    j   _xt_level1_int_handler
+    .space (0x20 - (.-_Level7InterruptVector))
 
 

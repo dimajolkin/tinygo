@@ -203,6 +203,70 @@ _xt_context_restore_and_return:
     ret
 
 /*
+ * _xt_context_restore_rfe - Восстановить контекст и вернуться через RFE
+ *
+ * Входные параметры:
+ *   a2 = указатель на сохраненный контекст (на стеке)
+ *
+ * Действия:
+ *   1. Восстановить ключевые регистры и SP
+ *   2. Восстановить регистры управления (PS, SAR, L*)
+ *   3. Выполнить RFE (возврат по EPC1/PS)
+ */
+.section .text._xt_context_restore_rfe,"ax",@progbits
+.align 4
+.global _xt_context_restore_rfe
+.type _xt_context_restore_rfe,@function
+
+_xt_context_restore_rfe:
+    // Восстановить SP из сохраненного контекста
+    l32i    a1, a2, XT_STK_A1
+
+    // Восстановить регистры управления (порядок как в restore)
+    l32i    a3, a2, XT_STK_SAR
+    wsr.sar a3
+
+    l32i    a3, a2, XT_STK_EXCCAUSE
+    wsr.exccause a3
+
+    l32i    a3, a2, XT_STK_EXCVADDR
+    wsr.excvaddr a3
+
+    l32i    a3, a2, XT_STK_LBEG
+    wsr.lbeg a3
+
+    l32i    a3, a2, XT_STK_LEND
+    wsr.lend a3
+
+    l32i    a3, a2, XT_STK_LCOUNT
+    wsr.lcount a3
+
+    // Восстановить PS (INTLEVEL и др.)
+    l32i    a3, a2, XT_STK_PS
+    wsr.ps  a3
+    rsync
+
+    // Восстановить часть общих регистров (минимально необходимое)
+    l32i    a3, a2, XT_STK_A3
+    l32i    a4, a2, XT_STK_A4
+    l32i    a5, a2, XT_STK_A5
+    l32i    a6, a2, XT_STK_A6
+    l32i    a7, a2, XT_STK_A7
+    l32i    a8, a2, XT_STK_A8
+    l32i    a9, a2, XT_STK_A9
+    l32i    a10, a2, XT_STK_A10
+    l32i    a11, a2, XT_STK_A11
+    l32i    a12, a2, XT_STK_A12
+    l32i    a13, a2, XT_STK_A13
+    l32i    a14, a2, XT_STK_A14
+    l32i    a15, a2, XT_STK_A15
+
+    // Возврат из исключения
+    rfe
+    nop
+    nop
+
+/*
  * _xt_check_context_alignment - Проверка выравнивания контекста
  * 
  * Входные параметры:

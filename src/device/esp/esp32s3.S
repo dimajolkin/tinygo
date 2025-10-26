@@ -10,6 +10,8 @@
 .section .literal.call_start_cpu0
 1:
     .long _stack_top
+2:
+    .long _vector_base
 
 .section .text.call_start_cpu0
 .global call_start_cpu0
@@ -51,7 +53,7 @@ call_start_cpu0:
     rsync
 
     // Set VECBASE to vector table base placed by linker in IRAM
-    movi a2, _vector_base
+    l32r a2, 2b
     wsr.vecbase a2
     rsync
 

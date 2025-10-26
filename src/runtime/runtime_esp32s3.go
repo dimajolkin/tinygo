@@ -37,8 +37,13 @@ func debugGPIO(n int) {
 
 //export main
 func main() {
-	// Disable Timer 0 watchdog.
+	// Disable Timer Group watchdogs (unlock then disable)
+	// TIMG0
+	esp.TIMG0.WDTWPROTECT.Set(0x50D83AA1)
 	esp.TIMG0.WDTCONFIG0.Set(0)
+	// TIMG1
+	esp.TIMG1.WDTWPROTECT.Set(0x50D83AA1)
+	esp.TIMG1.WDTCONFIG0.Set(0)
 
 	// Disable RTC watchdog.
 	esp.RTC_CNTL.WDTWPROTECT.Set(0x50D83AA1)
@@ -80,24 +85,24 @@ func main() {
 	initSystimerTick()
 
 	// Configure GPIO41 as debug output (toggled by SYSTIMER ISR)
-	//initDebugPin41()
+	initDebugPin41()
 
 	// One-shot: if SYSTIMER already asserted, raise pin and clear flag
-	//if (esp.SYSTIMER.INT_ST.Get() & 1) != 0 {
-	//	debugPin.High()
-	//	println("SYST one-shot: TARGET0 asserted")
-	//	esp.SYSTIMER.INT_CLR.Set(1 << 0)
-	//}
+	if (esp.SYSTIMER.INT_ST.Get() & 1) != 0 {
+		debugPin.High()
+		println("SYST one-shot: TARGET0 asserted")
+		esp.SYSTIMER.INT_CLR.Set(1 << 0)
+	}
 
 	// Force PS.INTLEVEL = 0 to allow IRQs and dump state
-	//setPSIntLevel(0)
+	setPSIntLevel(0)
 	dumpSystimerDebug("after initSystimerTick")
 
 	// Background: reflect ISR tick counter to GPIO41 without touching ISR
 	var last uint32
 	for {
-		if systimerIRQCount != last {
-			last = systimerIRQCount
+		if esp.IsrCount != last {
+			last = esp.IsrCount
 			if gpio41State == 0 {
 				debugPin.High()
 				gpio41State = 1
@@ -107,9 +112,6 @@ func main() {
 			}
 		}
 	}
-
-	// TEST: Generate 50kHz signal on GPIO36 for debugging
-	// testGPIO36_50kHz()
 
 	// Now use standard run() which will call initHeap() again but it should be safe
 	run()
@@ -278,11 +280,19 @@ var _ebss [0]byte
 
 // setPSIntLevel sets PS.INTLEVEL to the given level (0..15)
 func setPSIntLevel(level int) {
-	ps := device.AsmFull("rsr.ps {}", nil)
+	oldPs := device.AsmFull("rsr.ps {}", nil)
+	ie := device.AsmFull("rsr.intenable {}", nil)
+	intr := device.AsmFull("rsr.interrupt {}", nil)
+	println("DBG setPSIntLevel: oldPS=", uint32(uintptr(oldPs)&0xFFFF), " level=", level, " INTENABLE=", uint32(uintptr(ie)), " INTERRUPT=", uint32(uintptr(intr)))
+
+	ps := oldPs
 	ps &^= 0x0F
 	ps |= uintptr(level & 0x0F)
-	device.AsmFull("wsr {v}, PS", map[string]interface{}{"v": ps})
+	device.AsmFull("wsr.ps {v}", map[string]interface{}{"v": ps})
 	device.AsmFull("rsync", nil)
+
+	newPs := device.AsmFull("rsr.ps {}", nil)
+	println("DBG setPSIntLevel: newPS=", uint32(uintptr(newPs)&0xFFFF))
 }
 
 // dumpSystimerDebug prints key SYSTIMER/CPU interrupt state
@@ -309,7 +319,7 @@ func dumpSystimerDebug(tag string) {
 func initSystimerTick() {
 	const systimerClockHz = 80_000_000 // assumed SYSTIMER clock
 	const tickPeriodNs = 10_000_000    // 10ms
-	const cpuInterruptForSystimer = 20 // avoid conflict: 19 is used by GPIO
+	const cpuInterruptForSystimer = 23 // CPU-level interrupt line (avoid pending 20)
 	const debugSkipISRRegistration = false
 
 	// Compute period in timer ticks: ticks = Freq * period
@@ -319,9 +329,9 @@ func initSystimerTick() {
 	}
 	println("SYST step1 periodTicks=", periodTicks)
 
-	// Temporarily block interrupts during configuration
-	setPSIntLevel(15)
-	println("SYST step2 mask IRQs (PS=15)")
+	// Temporarily block interrupts during configuration (safe way)
+	old := interrupt.Disable()
+	println("SYST step2 mask IRQs (Disable)")
 
 	// Map SYSTIMER TARGET0 to selected CPU interrupt channel on core0
 	esp.INTERRUPT_CORE0.SetSYSTIMER_TARGET0_INT_MAP(cpuInterruptForSystimer)
@@ -345,26 +355,74 @@ func initSystimerTick() {
 	println("SYST step8 before isr registration")
 	if !debugSkipISRRegistration {
 		println("SYST step8.1 calling interrupt.New")
-		irq := interrupt.New(cpuInterruptForSystimer, systimerHandleInterrupt)
-		println("SYST step8.2 after interrupt.New")
-		_ = irq.Enable()
-		println("SYST step8.3 after irq.Enable")
+		_ = interrupt.New(cpuInterruptForSystimer, systimerHandleInterrupt)
+		println("SYST step8.2 after interrupt.New (Enable deferred)")
 	} else {
 		println("SYST step8 skipped isr registration (debug)")
 	}
 
 	// Clear any pending status and enable SYSTIMER interrupt bit
 	esp.SYSTIMER.INT_CLR.Set(1 << 0)
+	println("SYST after CLR: INT_ST=", esp.SYSTIMER.INT_ST.Get())
 	esp.SYSTIMER.INT_ENA.SetBits(1 << 0)
+	println("SYST after ENA: INT_ENA=", esp.SYSTIMER.INT_ENA.Get())
 	println("SYST step9 int ena + clr")
 
 	// Arm periodic alarm
 	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(1)
+	println("SYST after WORK_EN: T0CONF=", esp.SYSTIMER.TARGET0_CONF.Get())
 	println("SYST step10 work en")
 
-	// Unmask interrupts
-	setPSIntLevel(0)
-	println("SYST step11 unmask IRQs (PS=0)")
+	// Unmask interrupts (log VECBASE/masks/status before)
+	vec := device.AsmFull("rsr.vecbase {}", nil)
+	ps := device.AsmFull("rsr.ps {}", nil)
+	ien := device.AsmFull("rsr.intenable {}", nil)
+	ist := device.AsmFull("rsr.interrupt {}", nil)
+	println("SYST pre-unmask: VECBASE=", uint32(uintptr(vec)),
+		" MAP=", esp.INTERRUPT_CORE0.GetSYSTIMER_TARGET0_INT_MAP(),
+		" PS=", uint32(uintptr(ps)&0xFFFF),
+		" INTENABLE=", uint32(uintptr(ien)),
+		" INTERRUPT=", uint32(uintptr(ist)))
+	// Mask CPU interrupts to 0 before restore to avoid immediate IRQ burst
+	device.AsmFull("wsr.intenable {v}", map[string]interface{}{"v": uintptr(0)})
+	device.AsmFull("rsync", nil)
+	println("SYST step11 about to Restore (INTENABLE=0)")
+	interrupt.Restore(old)
+	println("SYST step11 restored, PS=", uint32(uintptr(device.AsmFull("rsr.ps {}", nil))&0xFFFF))
+
+	// Now enable CPU interrupt line for SYSTIMER
+	if !debugSkipISRRegistration {
+		println("SYST step12 enabling IRQ line")
+		// INTLEVEL=15 (mask all) while enabling line and clearing pending
+		psTmp := device.AsmFull("rsr.ps {}", nil)
+		psTmp &^= 0x0F
+		psTmp |= 15
+		device.AsmFull("wsr.ps {v}", map[string]interface{}{"v": psTmp})
+		device.AsmFull("rsync", nil)
+
+		// Clear peripheral pending if any
+		if (esp.SYSTIMER.INT_ST.Get() & 1) != 0 {
+			esp.SYSTIMER.INT_CLR.Set(1 << 0)
+			println("SYST step12 cleared INT_ST")
+		}
+
+		// Set INTENABLE bit for selected CPU interrupt line
+		ien := device.AsmFull("rsr.intenable {}", nil)
+		ien |= (1 << cpuInterruptForSystimer)
+		device.AsmFull("wsr.intenable {v}", map[string]interface{}{"v": ien})
+		device.AsmFull("rsync", nil)
+		ien2 := device.AsmFull("rsr.intenable {}", nil)
+		intr2 := device.AsmFull("rsr.interrupt {}", nil)
+		println("SYST step12 INTENABLE=", uint32(uintptr(ien2)), " INTERRUPT=", uint32(uintptr(intr2)))
+
+		// Drop to INTLEVEL=1 first, then 0 (avoid immediate burst)
+		ps1 := device.AsmFull("rsr.ps {}", nil)
+		ps1 &^= 0x0F
+		ps1 |= 1
+		device.AsmFull("wsr.ps {v}", map[string]interface{}{"v": ps1})
+		device.AsmFull("rsync", nil)
+		setPSIntLevel(0)
+	}
 
 	// Minimal log
 	println("SYSTIMER tick armed: periodTicks=", periodTicks)
