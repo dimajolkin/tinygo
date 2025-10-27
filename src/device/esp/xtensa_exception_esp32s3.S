@@ -15,6 +15,7 @@
 .extern _frxt_int_handlers
 .extern handleInterrupt
 .extern handleException
+.extern IsrCount
 
 /*
  * _frxt_int_enter - Вход в обработчик прерывания
@@ -167,18 +168,19 @@ _xt_level1_int_handler_entry:
     movi    a2, 1                           /* interrupt level 1 */
     call0   _frxt_int_enter
     
-    /* Set up PS for C code: enable interrupts above level 1, clear EXCM */
-    movi    a0, 0x00000001 | 0x00000020     /* PS_INTLEVEL(1) | PS_UM */
-    wsr     a0, PS
-    rsync
+    /* TEMPORARY TEST: Increment counter in ASM (bypass Go) */
+    movi    a2, IsrCount
+    l32i    a3, a2, 0
+    addi    a3, a3, 1
+    s32i    a3, a2, 0
     
-    /* DEBUG: Mark entry to ISR (3 nops for debugger breakpoint) */
-    nop
-    nop
-    nop
+    /* DON'T set up PS for C yet - keep EXCM=1 to avoid re-entry */
+    /* movi    a0, 0x00000001 | 0x00000020 */
+    /* wsr     a0, PS */
+    /* rsync */
     
-    /* Call the Go interrupt handler */
-    call0   handleInterrupt
+    /* SKIP handleInterrupt for now to test if vector entry works */
+    /* call0   handleInterrupt */
     
     /* DEBUG: Mark return from handleInterrupt (3 nops) */
     nop
