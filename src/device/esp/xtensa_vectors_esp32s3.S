@@ -8,34 +8,70 @@
  * We route Level-1 user exceptions to low-level interrupt handler which calls Go ISR.
  */
 
+/* Special Register definitions (from ESP-IDF xtensa/specreg.h) */
+#define EPC_1           177
+#define EXCSAVE_1       209
+#define PS              230
+#define EXCCAUSE        232
+
 .extern _xt_level1_int_handler
 .extern _xt_unhandled_exception
 .extern _frxt_int_depth
 
-/* Provide storage for _frxt_int_depth if not provided elsewhere */
+/* Provide storage for interrupt counters */
 .section .bss._frxt_int_depth, "aw", @nobits
 .align 4
 .global _frxt_int_depth
 _frxt_int_depth:
     .space 4
 
-/* User Exception Vector (Level-1) -> save a0 and jump to dispatcher */
-.section .UserExceptionVector.text, "ax", @progbits
+.section .bss.VectorEntryCount, "aw", @nobits
 .align 4
+.global VectorEntryCount
+VectorEntryCount:
+    .space 4
+
+.section .bss.IsrCountBeforeGo, "aw", @nobits
+.align 4
+.global IsrCountBeforeGo
+IsrCountBeforeGo:
+    .space 4
+
+.section .bss.IsrCountAfterGo, "aw", @nobits
+.align 4
+.global IsrCountAfterGo
+IsrCountAfterGo:
+    .space 4
+
+/* User Exception Vector (Level-1) -> save a0 and jump to dispatcher */
+.begin literal_prefix .UserExceptionVector
+.section .UserExceptionVector.text, "ax"
 .global _UserExceptionVector
+.type _UserExceptionVector,@function
+.align 4
 _UserExceptionVector:
-    wsr.excsave1 a0                         /* save a0 in EXCSAVE_1 (SR=209) */
-    call0   _xt_user_exc                    /* jump to user exception handler */
-    /* never returns here */
-    .space (0x20 - (.-_UserExceptionVector))
+    wsr.excsave1 a0                         /* preserve a0 (dot notation like in esp32s3.S) */
+    call0   _xt_user_exc                    /* user exception handler */
+    /* never returns here - call0 is used as a jump */
+.end literal_prefix
 
 /* User exception dispatcher: check if Level-1 interrupt or exception */
 .section .text._xt_user_exc, "ax", @progbits
 .align 4
 .type _xt_user_exc,@function
 _xt_user_exc:
+    /* DEBUG: Increment VectorEntryCount to track vector entry */
+    wsr.excsave1 a2                         /* save a2 temporarily */
+    movi    a0, VectorEntryCount
+    l32i    a2, a0, 0
+    addi    a2, a2, 1
+    s32i    a2, a0, 0
+    rsr.excsave1 a2                         /* restore a2 */
+    rsr.excsave1 a0                         /* restore a0 (was saved by vector) */
+    
     /* Check if this is a Level-1 interrupt (EXCCAUSE == 4) */
-    rsr.exccause a0
+    wsr.excsave1 a0                         /* save a0 again for exccause read */
+    rsr.exccause a0                         /* read EXCCAUSE (dot notation) */
     bnei    a0, 4, _xt_unhandled_exception  /* if not level1 interrupt, handle as exception */
     /* Fall through to _xt_lowint1 for interrupts */
 
@@ -49,13 +85,13 @@ _xt_lowint1:
     addi    sp, sp, -XT_STK_FRMSZ           /* allocate stack frame (112 bytes) */
     s32i    a0, sp, XT_STK_A1               /* save pre-interrupt SP */
     
-    rsr.ps  a0                              /* save PS */
+    rsr.ps  a0                              /* save PS (dot notation) */
     s32i    a0, sp, XT_STK_PS
     
-    rsr.epc1 a0                             /* save interruptee's PC (SR=177) */
+    rsr.epc1 a0                             /* save interruptee's PC from EPC_1 (dot notation) */
     s32i    a0, sp, XT_STK_PC
     
-    rsr.excsave1 a0                         /* restore original a0 from EXCSAVE_1 */
+    rsr.excsave1 a0                         /* restore original a0 from EXCSAVE_1 (dot notation) */
     s32i    a0, sp, XT_STK_A0               /* save original a0 */
     
     movi    a0, _xt_user_exit               /* save exit point */
@@ -69,67 +105,76 @@ _xt_lowint1:
 _xt_user_exit:
     /* This is the return point after interrupt handling */
     l32i    a0, sp, XT_STK_PS               /* restore PS */
-    wsr.ps  a0
+    wsr.ps  a0                              /* restore PS (dot notation) */
     l32i    a0, sp, XT_STK_PC               /* restore PC */
-    wsr.epc1 a0                             /* (SR=177) */
+    wsr.epc1 a0                             /* restore to EPC_1 (dot notation) */
     l32i    a0, sp, XT_STK_A0               /* restore a0 */
     l32i    sp, sp, XT_STK_A1               /* restore SP */
     rsync
     rfe                                      /* return from exception */
 
-/* The rest of vectors can be simple loops/placeholders for now */
-.section .DoubleExceptionVector.text, "ax", @progbits
+/* The rest of vectors - simple placeholders */
+.begin literal_prefix .DoubleExceptionVector
+.section .DoubleExceptionVector.text, "ax"
 .align 4
 _DoubleExceptionVector:
     j   _xt_unhandled_exception
-    .space (0x20 - (.-_DoubleExceptionVector))
+.end literal_prefix
 
-.section .KernelExceptionVector.text, "ax", @progbits
+.begin literal_prefix .KernelExceptionVector
+.section .KernelExceptionVector.text, "ax"
 .align 4
 _KernelExceptionVector:
     j   _xt_unhandled_exception
-    .space (0x20 - (.-_KernelExceptionVector))
+.end literal_prefix
 
-.section .NMIExceptionVector.text, "ax", @progbits
+.begin literal_prefix .NMIExceptionVector
+.section .NMIExceptionVector.text, "ax"
 .align 4
 _NMIExceptionVector:
     j   _xt_unhandled_exception
-    .space (0x20 - (.-_NMIExceptionVector))
+.end literal_prefix
 
-.section .Level2InterruptVector.text, "ax", @progbits
+.begin literal_prefix .Level2InterruptVector
+.section .Level2InterruptVector.text, "ax"
 .align 4
 _Level2InterruptVector:
     j   _xt_unhandled_exception
-    .space (0x20 - (.-_Level2InterruptVector))
+.end literal_prefix
 
-.section .Level3InterruptVector.text, "ax", @progbits
+.begin literal_prefix .Level3InterruptVector
+.section .Level3InterruptVector.text, "ax"
 .align 4
 _Level3InterruptVector:
     j   _xt_unhandled_exception
-    .space (0x20 - (.-_Level3InterruptVector))
+.end literal_prefix
 
-.section .Level4InterruptVector.text, "ax", @progbits
+.begin literal_prefix .Level4InterruptVector
+.section .Level4InterruptVector.text, "ax"
 .align 4
 _Level4InterruptVector:
     j   _xt_unhandled_exception
-    .space (0x20 - (.-_Level4InterruptVector))
+.end literal_prefix
 
-.section .Level5InterruptVector.text, "ax", @progbits
+.begin literal_prefix .Level5InterruptVector
+.section .Level5InterruptVector.text, "ax"
 .align 4
 _Level5InterruptVector:
     j   _xt_unhandled_exception
-    .space (0x20 - (.-_Level5InterruptVector))
+.end literal_prefix
 
-.section .Level6InterruptVector.text, "ax", @progbits
+.begin literal_prefix .Level6InterruptVector
+.section .Level6InterruptVector.text, "ax"
 .align 4
 _Level6InterruptVector:
     j   _xt_unhandled_exception
-    .space (0x20 - (.-_Level6InterruptVector))
+.end literal_prefix
 
-.section .Level7InterruptVector.text, "ax", @progbits
+.begin literal_prefix .Level7InterruptVector
+.section .Level7InterruptVector.text, "ax"
 .align 4
 _Level7InterruptVector:
     j   _xt_unhandled_exception
-    .space (0x20 - (.-_Level7InterruptVector))
+.end literal_prefix
 
 

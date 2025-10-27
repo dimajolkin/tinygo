@@ -15,7 +15,10 @@
 .extern _frxt_int_handlers
 .extern handleInterrupt
 .extern handleException
+.extern VectorEntryCount
 .extern IsrCount
+.extern IsrCountBeforeGo
+.extern IsrCountAfterGo
 
 /*
  * _frxt_int_enter - Вход в обработчик прерывания
@@ -145,23 +148,23 @@ _xt_level1_int_handler_entry:
     s32i    a14, sp, XT_STK_A14
     s32i    a15, sp, XT_STK_A15
     
-    /* Save special registers */
-    rsr     a2, SAR
+    /* Save special registers (use dot notation) */
+    rsr.sar a2
     s32i    a2, sp, XT_STK_SAR
     
-    rsr     a2, EXCCAUSE
+    rsr.exccause a2
     s32i    a2, sp, XT_STK_EXCCAUSE
     
-    rsr     a2, EXCVADDR
+    rsr.excvaddr a2
     s32i    a2, sp, XT_STK_EXCVADDR
     
-    rsr     a2, LBEG
+    rsr.lbeg a2
     s32i    a2, sp, XT_STK_LBEG
     
-    rsr     a2, LEND
+    rsr.lend a2
     s32i    a2, sp, XT_STK_LEND
     
-    rsr     a2, LCOUNT
+    rsr.lcount a2
     s32i    a2, sp, XT_STK_LCOUNT
     
     /* Call RTOS interrupt entry hook - sets PS.INTLEVEL=0 (level-1) */
@@ -172,14 +175,26 @@ _xt_level1_int_handler_entry:
      * After _frxt_int_enter, PS.INTLEVEL is already 0 (correct for level 1)
      * We just need to clear EXCM (bit 4) to enable higher-priority interrupts
      * Note: EXCM was set automatically by the exception/interrupt hardware */
-    rsr     a0, PS
+    rsr.ps  a0                              /* use dot notation */
     movi    a2, ~(1 << 4)                   /* mask to clear EXCM bit */
     and     a0, a0, a2
-    wsr     a0, PS
+    wsr.ps  a0                              /* use dot notation */
     rsync
+    
+    /* DEBUG: Increment IsrCountBeforeGo BEFORE calling handleInterrupt */
+    movi    a2, IsrCountBeforeGo
+    l32i    a3, a2, 0
+    addi    a3, a3, 1
+    s32i    a3, a2, 0
     
     /* Call Go interrupt handler */
     call0   handleInterrupt
+    
+    /* DEBUG: Increment IsrCountAfterGo AFTER returning from handleInterrupt */
+    movi    a2, IsrCountAfterGo
+    l32i    a3, a2, 0
+    addi    a3, a3, 1
+    s32i    a3, a2, 0
     
     /* DEBUG: Mark return from handleInterrupt (3 nops) */
     nop
@@ -189,18 +204,18 @@ _xt_level1_int_handler_entry:
     /* Call RTOS interrupt exit hook */
     call0   _frxt_int_exit
     
-    /* Restore special registers */
+    /* Restore special registers (use dot notation) */
     l32i    a2, sp, XT_STK_SAR
-    wsr     a2, SAR
+    wsr.sar a2
     
     l32i    a2, sp, XT_STK_LBEG
-    wsr     a2, LBEG
+    wsr.lbeg a2
     
     l32i    a2, sp, XT_STK_LEND
-    wsr     a2, LEND
+    wsr.lend a2
     
     l32i    a2, sp, XT_STK_LCOUNT
-    wsr     a2, LCOUNT
+    wsr.lcount a2
     
     /* Restore A2-A15 */
     l32i    a2, sp, XT_STK_A2

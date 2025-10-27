@@ -35,6 +35,9 @@ SECTIONS
         . = _vector_base + 0x0E0; KEEP(*(.Level5InterruptVector.text))
         . = _vector_base + 0x100; KEEP(*(.Level6InterruptVector.text))
         . = _vector_base + 0x120; KEEP(*(.Level7InterruptVector.text))
+        
+        /* CRITICAL: Literal pool for all vectors (following ESP-IDF model) */
+        *(.*Vector.literal)
     } >IRAM
 
     /* Constant literals and code. Loaded into IRAM for now. Eventually, most

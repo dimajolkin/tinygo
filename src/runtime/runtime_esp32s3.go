@@ -33,6 +33,14 @@ import (
 // Note: VECBASE is already set in call_start_cpu0 (esp32s3.S), we just read it here
 func getVecbase() uintptr
 
+// External symbols from linker script and ASM (esp32s3.ld, xtensa_vectors_esp32s3.S)
+//
+//go:extern _vector_base
+var vectorBase [0]byte
+
+//go:extern _UserExceptionVector
+var userExceptionVector [0]byte
+
 // Debug functions sorted by GPIO number (ascending: 4→5→6→7)
 func debugGPIO(n int) {
 	*(*uint32)(unsafe.Pointer(uintptr(0x60004024))) |= (1 << n) // GPIO_ENABLE_REG: enable GPIO4 output
@@ -172,15 +180,35 @@ func main() {
 		println("\nTest 2: Software interrupt on CPU_INT 23...")
 		device.AsmFull("wsr.intset {v}", map[string]interface{}{"v": uintptr(1 << 23)})
 		device.AsmFull("rsync", nil)
+		vectorEntry := esp.VectorEntryCount
 		swCount := esp.IsrCount
-		println("  After SW interrupt: IsrCount=", swCount)
-		if swCount > newCount {
+		beforeGo := esp.IsrCountBeforeGo
+		afterGo := esp.IsrCountAfterGo
+		println("  After SW interrupt:")
+		println("    VectorEntryCount=", vectorEntry, " (did CPU jump to vector?)")
+		println("    IsrCount=", swCount, " (from Go handleInterrupt)")
+		println("    IsrCountBeforeGo=", beforeGo, " IsrCountAfterGo=", afterGo)
+
+		// Detailed diagnostics
+		if vectorEntry == 0 {
+			println("  FATAL: CPU never jumped to _UserExceptionVector!")
+			println("  Check: VECBASE, vector table placement, interrupt routing")
+		} else if beforeGo == 0 {
+			println("  PROBLEM: Vector entered but crashed before handleInterrupt!")
+			println("  Check: PS register setup, EXCM bit, ASM flow")
+		} else if afterGo == 0 {
+			println("  PROBLEM: handleInterrupt was called but never returned!")
+			println("  Check: handleInterrupt crashes, stack overflow")
+		} else if swCount > newCount {
 			println("  SUCCESS! Vector table works!")
 		} else {
 			println("  FAILED! Vector table doesn't call handleInterrupt!")
 		}
 
 		println("\nDiagnostic dump:")
+
+		// Dump vector table addresses and contents
+		dumpVectorTableLayout()
 
 		// Check SYSTIMER state
 		esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
@@ -659,4 +687,113 @@ func dumpVectorTable() {
 	ena := esp.SYSTIMER.INT_ENA.Get()
 	println("SYSTIMER: INT_ST=", st, " INT_ENA=", ena)
 	println("==========================")
+}
+
+// dumpVectorTableLayout prints vector table memory layout and first instructions
+func dumpVectorTableLayout() {
+	// Read VECBASE
+	vecbase := device.AsmFull("rsr.vecbase {}", nil)
+	vecbaseAddr := uint32(uintptr(vecbase))
+
+	println("=== VECTOR TABLE LAYOUT ===")
+	println("VECBASE =", vecbaseAddr, "(expected 0x40374000)")
+
+	// Check linker symbol _vector_base
+	linkerVectorBase := uintptr(unsafe.Pointer(&vectorBase))
+	println("_vector_base (linker) =", uint32(linkerVectorBase))
+
+	if uint32(linkerVectorBase) != vecbaseAddr {
+		println("ERROR: VECBASE != _vector_base!")
+		println("  Linker placed vectors at:", uint32(linkerVectorBase))
+		println("  But VECBASE points to:", vecbaseAddr)
+	} else {
+		println("OK: VECBASE matches _vector_base")
+	}
+
+	// Check alignment (must be 0x400 = 1024 bytes aligned)
+	if (vecbaseAddr & 0x3FF) != 0 {
+		println("ERROR: VECBASE not aligned to 1024 bytes!")
+	} else {
+		println("OK: VECBASE aligned correctly")
+	}
+
+	// Vector offsets (each is 0x20 = 32 bytes apart)
+	vectors := []struct {
+		name   string
+		offset uint32
+	}{
+		{"UserException (Level-1)", 0x000},
+		{"DoubleException", 0x020},
+		{"KernelException", 0x040},
+		{"NMIException", 0x060},
+		{"Level2Interrupt", 0x080},
+		{"Level3Interrupt", 0x0A0},
+		{"Level4Interrupt", 0x0C0},
+		{"Level5Interrupt", 0x0E0},
+		{"Level6Interrupt", 0x100},
+		{"Level7Interrupt", 0x120},
+	}
+
+	println("\nVector addresses and first instruction:")
+	for _, v := range vectors {
+		addr := vecbaseAddr + v.offset
+		// Read first 32-bit instruction at vector entry
+		firstInstr := *(*uint32)(unsafe.Pointer(uintptr(addr)))
+		println("  ", v.name, "@ addr=", addr, " instr=", firstInstr)
+
+		// Check if it looks like valid code (not all zeros/ones)
+		if firstInstr == 0 || firstInstr == 0xFFFFFFFF {
+			println("    WARNING: Vector looks uninitialized!")
+		}
+
+		// Decode first instruction for UserException
+		if v.offset == 0 {
+			// Compare with linker symbol _UserExceptionVector
+			linkerUserVecAddr := uintptr(unsafe.Pointer(&userExceptionVector))
+			linkerUserVecInstr := *(*uint32)(unsafe.Pointer(linkerUserVecAddr))
+			println("    _UserExceptionVector (linker) @ addr=", uint32(linkerUserVecAddr), " instr=", linkerUserVecInstr)
+
+			if uint32(linkerUserVecAddr) != addr {
+				println("    ERROR: Linker placed UserException at different address!")
+			}
+
+			if linkerUserVecInstr != firstInstr {
+				println("    ERROR: Instruction mismatch!")
+				println("      At linker address:", linkerUserVecInstr)
+				println("      At VECBASE address:", firstInstr)
+			}
+
+			// Expected: wsr.excsave1 a0 (opcode ~0x0090D1??)
+			// Or call0 instruction (opcode 0x05 in low bits)
+			opcode := firstInstr & 0x0F
+			println("    First instruction opcode:", opcode)
+			if opcode == 0x05 {
+				println("    -> CALL0 instruction (good!)")
+			} else if (firstInstr & 0xFF) == 0xD1 {
+				println("    -> WSR instruction (good!)")
+			} else {
+				println("    -> UNKNOWN/BAD instruction!")
+			}
+		}
+	}
+
+	// Print addresses of key ASM functions (from linker symbols)
+	println("\nKey function addresses:")
+	println("  _UserExceptionVector  expected at 0x", hexString(vecbaseAddr+0x000))
+	println("  _xt_user_exc          (should be in .text)")
+	println("  _xt_lowint1           (should be in .text)")
+	println("  _xt_level1_int_handler_entry (should be in .text)")
+
+	println("==============================")
+}
+
+// hexString converts uint32 to hex string (helper for printing)
+func hexString(val uint32) string {
+	const hexChars = "0123456789ABCDEF"
+	result := make([]byte, 8)
+	for i := 7; i >= 0; i-- {
+		result[i] = hexChars[val&0xF]
+		val >>= 4
+	}
+	return string(result)
 }
