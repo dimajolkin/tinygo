@@ -29,6 +29,10 @@ import (
 	"unsafe"
 )
 
+// External ASM function from vecbase_esp32s3.S (getVecbase)
+// Note: VECBASE is already set in call_start_cpu0 (esp32s3.S), we just read it here
+func getVecbase() uintptr
+
 // Debug functions sorted by GPIO number (ascending: 4→5→6→7)
 func debugGPIO(n int) {
 	*(*uint32)(unsafe.Pointer(uintptr(0x60004024))) |= (1 << n) // GPIO_ENABLE_REG: enable GPIO4 output
@@ -37,6 +41,9 @@ func debugGPIO(n int) {
 
 //export main
 func main() {
+	// DEBUG: Signal entry to main() via GPIO4
+	debugGPIO(4)
+
 	// Disable Timer Group watchdogs (unlock then disable)
 	// TIMG0
 	esp.TIMG0.WDTWPROTECT.Set(0x50D83AA1)
@@ -73,6 +80,17 @@ func main() {
 	// Initialize UART after USB configuration
 	machine.USBCDC.Configure(machine.UARTConfig{BaudRate: 115200})
 	machine.InitSerial()
+
+	// DEBUG: Signal UART initialized via GPIO5
+	debugGPIO(5)
+
+	// VECBASE is already set in call_start_cpu0 (esp32s3.S line 58-61)
+	// to _vector_base (0x40374000) - no need to set it again
+	println(">>> VECBASE was set in call_start_cpu0 to _vector_base (0x40374000)")
+	println(">>> Our vector table is ready for interrupts!")
+
+	// DEBUG: Signal VECBASE setup complete via GPIO6
+	debugGPIO(6)
 
 	initTimer()
 
@@ -154,8 +172,6 @@ func main() {
 		println("\nTest 2: Software interrupt on CPU_INT 23...")
 		device.AsmFull("wsr.intset {v}", map[string]interface{}{"v": uintptr(1 << 23)})
 		device.AsmFull("rsync", nil)
-		for j := 0; j < 1000000; j++ {
-		}
 		swCount := esp.IsrCount
 		println("  After SW interrupt: IsrCount=", swCount)
 		if swCount > newCount {

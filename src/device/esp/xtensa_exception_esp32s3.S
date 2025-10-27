@@ -164,23 +164,22 @@ _xt_level1_int_handler_entry:
     rsr     a2, LCOUNT
     s32i    a2, sp, XT_STK_LCOUNT
     
-    /* Call RTOS interrupt entry hook */
+    /* Call RTOS interrupt entry hook - sets PS.INTLEVEL=0 (level-1) */
     movi    a2, 1                           /* interrupt level 1 */
     call0   _frxt_int_enter
     
-    /* TEMPORARY TEST: Increment counter in ASM (bypass Go) */
-    movi    a2, IsrCount
-    l32i    a3, a2, 0
-    addi    a3, a3, 1
-    s32i    a3, a2, 0
+    /* Clear EXCM bit to allow nested interrupts
+     * After _frxt_int_enter, PS.INTLEVEL is already 0 (correct for level 1)
+     * We just need to clear EXCM (bit 4) to enable higher-priority interrupts
+     * Note: EXCM was set automatically by the exception/interrupt hardware */
+    rsr     a0, PS
+    movi    a2, ~(1 << 4)                   /* mask to clear EXCM bit */
+    and     a0, a0, a2
+    wsr     a0, PS
+    rsync
     
-    /* DON'T set up PS for C yet - keep EXCM=1 to avoid re-entry */
-    /* movi    a0, 0x00000001 | 0x00000020 */
-    /* wsr     a0, PS */
-    /* rsync */
-    
-    /* SKIP handleInterrupt for now to test if vector entry works */
-    /* call0   handleInterrupt */
+    /* Call Go interrupt handler */
+    call0   handleInterrupt
     
     /* DEBUG: Mark return from handleInterrupt (3 nops) */
     nop
