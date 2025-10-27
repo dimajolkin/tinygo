@@ -87,9 +87,92 @@ func main() {
 	// Configure GPIO41 as debug output (toggled by SYSTIMER ISR)
 	initDebugPin41()
 
-	// Force PS.INTLEVEL = 0 to allow IRQs and dump state
+	// CRITICAL: Before enabling interrupts, rearm TARGET to be FAR in future
+	// This ensures we don't get immediate interrupt during println
+	esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
+	for esp.SYSTIMER.GetUNIT1_OP_TIMER_UNIT1_VALUE_VALID() == 0 {
+	}
+	nowSafe := esp.SYSTIMER.UNIT1_VALUE_LO.Get()
+	targetSafe := nowSafe + 800000 // +10ms in future
+	esp.SYSTIMER.SetTARGET0_LO(targetSafe)
+	esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1)
+	esp.SYSTIMER.INT_CLR.Set(1 << 0) // Clear any pending
+
+	// CRITICAL: Enable interrupts!
 	setPSIntLevel(0)
-	dumpSystimerDebug("after initSystimerTick")
+	println(">>> IRQs enabled! Monitoring for 200 cycles (~20-30ms)...")
+
+	// Monitor ISR count SILENTLY (collect data, print AFTER)
+	var samples [11]uint32 // Snapshots at cycles 0, 20, 40, ..., 200
+	sampleIdx := 0
+
+	for i := 0; i < 200; i++ {
+		// Busy-wait (~100us per cycle on 240MHz)
+		for j := 0; j < 100000; j++ {
+		}
+
+		// Collect samples every 20 cycles
+		if i%20 == 0 || i == 199 {
+			if sampleIdx < 11 {
+				samples[sampleIdx] = esp.IsrCount
+				sampleIdx++
+			}
+		}
+	}
+
+	// CRITICAL: Disable interrupts before printing results!
+	// println is NOT reentrant and crashes if interrupted
+	old := interrupt.Disable()
+
+	println(">>> Monitoring complete! Results:")
+	for i := 0; i < sampleIdx; i++ {
+		cycle := i * 20
+		if i == sampleIdx-1 && cycle != 199 {
+			cycle = 199
+		}
+		println("  Cycle", cycle, ": IsrCount=", samples[i])
+	}
+	finalCount := esp.IsrCount
+	println(">>> Final IsrCount=", finalCount)
+
+	if finalCount == 0 {
+		println("FATAL: No ISR fired! Diagnostic dump:")
+
+		// Check SYSTIMER state
+		esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
+		for esp.SYSTIMER.GetUNIT1_OP_TIMER_UNIT1_VALUE_VALID() == 0 {
+		}
+		now := esp.SYSTIMER.UNIT1_VALUE_LO.Get()
+		target := esp.SYSTIMER.TARGET0_LO.Get()
+		intSt := esp.SYSTIMER.INT_ST.Get()
+		intEna := esp.SYSTIMER.INT_ENA.Get()
+		conf := esp.SYSTIMER.CONF.Get()
+		t0conf := esp.SYSTIMER.TARGET0_CONF.Get()
+
+		println("SYSTIMER:")
+		println("  NOW=", now, " TARGET=", target)
+		println("  INT_ST=", intSt, " INT_ENA=", intEna)
+		println("  CONF=", conf, " T0CONF=", t0conf)
+		println("  Counter crossed target?", now >= target)
+
+		// Check Interrupt Matrix
+		mapVal := esp.INTERRUPT_CORE0.GetSYSTIMER_TARGET0_INT_MAP()
+		println("Interrupt Matrix: SYSTIMER_TARGET0 -> CPU_INT", mapVal)
+
+		// Check CPU interrupt enable
+		intEnableReg := device.AsmFull("rsr.intenable {}", nil)
+		println("CPU INTENABLE=", uint32(intEnableReg))
+		println("  Bit 23 enabled?", (uint32(intEnableReg)&(1<<23)) != 0)
+
+		println("\nHalting...")
+		for {
+		}
+	}
+
+	println("SUCCESS! ISR is working! GPIO41 should be blinking.")
+	println(">>> Re-enabling interrupts for background loop...")
+
+	interrupt.Restore(old) // Re-enable interrupts
 
 	// Background: reflect ISR tick counter to GPIO41 without touching ISR
 	var last uint32
@@ -203,8 +286,6 @@ func initGPIOPeripherals() {
 	// Also enable GPIO sigma delta clock if needed
 	esp.GPIO_SD.SetSIGMADELTA_CG_CLK_EN(1)
 	esp.GPIO_SD.SetSIGMADELTA_MISC_FUNCTION_CLK_EN(1)
-
-	debugGPIO(7) // Indicate GPIO peripherals initialized
 }
 
 // initSPIPeripherals initializes SPI2 and SPI3 peripherals exactly like ESP-IDF
@@ -225,8 +306,6 @@ func initSPIPeripherals() {
 
 	// Initialize SPI2 master mode like ESP-IDF spi_ll_master_init
 	initSPI2Master()
-
-	debugGPIO(6) // Indicate SPI peripherals initialized
 }
 
 // initSPI2Master initializes SPI2 in master mode exactly like ESP-IDF spi_ll_master_init
@@ -271,21 +350,48 @@ var _sbss [0]byte
 //go:extern _ebss
 var _ebss [0]byte
 
-// setPSIntLevel sets PS.INTLEVEL to the given level (0..15)
-func setPSIntLevel(level int) {
-	oldPs := device.AsmFull("rsr.ps {}", nil)
-	ie := device.AsmFull("rsr.intenable {}", nil)
-	intr := device.AsmFull("rsr.interrupt {}", nil)
-	println("DBG setPSIntLevel: oldPS=", uint32(uintptr(oldPs)&0xFFFF), " level=", level, " INTENABLE=", uint32(uintptr(ie)), " INTERRUPT=", uint32(uintptr(intr)))
+// safePrint1 prints 1 arg with interrupts disabled
+func safePrint1(a interface{}) {
+	old := interrupt.Disable()
+	println(a)
+	interrupt.Restore(old)
+}
 
+// safePrint2 prints 2 args with interrupts disabled
+func safePrint2(a, b interface{}) {
+	old := interrupt.Disable()
+	println(a, b)
+	interrupt.Restore(old)
+}
+
+// safePrint3 prints 3 args with interrupts disabled
+func safePrint3(a, b, c interface{}) {
+	old := interrupt.Disable()
+	println(a, b, c)
+	interrupt.Restore(old)
+}
+
+// safePrint4 prints 4 args with interrupts disabled
+func safePrint4(a, b, c, d interface{}) {
+	old := interrupt.Disable()
+	println(a, b, c, d)
+	interrupt.Restore(old)
+}
+
+// setPSIntLevel sets PS.INTLEVEL to the given level (0..15)
+// WARNING: Setting level=0 enables ALL interrupts! Must be called when ready.
+func setPSIntLevel(level int) {
+	// Read current PS
+	oldPs := device.AsmFull("rsr.ps {}", nil)
+
+	// Modify PS.INTLEVEL field (bits [3:0])
 	ps := oldPs
-	ps &^= 0x0F
-	ps |= uintptr(level & 0x0F)
+	ps &^= 0x0F                 // Clear INTLEVEL bits
+	ps |= uintptr(level & 0x0F) // Set new INTLEVEL
+
+	// Write new PS and sync
 	device.AsmFull("wsr.ps {v}", map[string]interface{}{"v": ps})
 	device.AsmFull("rsync", nil)
-
-	newPs := device.AsmFull("rsr.ps {}", nil)
-	println("DBG setPSIntLevel: newPS=", uint32(uintptr(newPs)&0xFFFF))
 }
 
 // dumpSystimerDebug prints key SYSTIMER/CPU interrupt state
@@ -297,21 +403,28 @@ func dumpSystimerDebug(tag string) {
 	ena := esp.SYSTIMER.INT_ENA.Get()
 	conf := esp.SYSTIMER.CONF.Get()
 	t0conf := esp.SYSTIMER.TARGET0_CONF.Get()
-	now := esp.SYSTIMER.UNIT0_VALUE_LO.Get()
+
+	// ВАЖНО: TARGET0 привязан к UNIT1 (строка 337: SetTARGET0_CONF_TARGET0_TIMER_UNIT_SEL(1))
+	// Поэтому читаем UNIT1, а не UNIT0!
+	esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
+	for esp.SYSTIMER.GetUNIT1_OP_TIMER_UNIT1_VALUE_VALID() == 0 {
+	}
+	now := esp.SYSTIMER.UNIT1_VALUE_LO.Get()
+	nowHi := esp.SYSTIMER.UNIT1_VALUE_HI.Get()
+
 	tgt := esp.SYSTIMER.TARGET0_LO.Get()
-	nowHi := esp.SYSTIMER.UNIT0_VALUE_HI.Get()
 	tgtHi := esp.SYSTIMER.REAL_TARGET0_HI.Get()
 	println("-- SYSTIMER DEBUG (", tag, ") --")
 	println("MAP=", mapVal, " INTENABLE=", uint32(intEna), " PS=", uint32(uintptr(ps)&0x0F))
 	println("SYSTIMER: INT_ST=", st, " INT_ENA=", ena, " CONF=", conf, " T0CONF=", t0conf)
-	println("UNIT0_HI=", nowHi, " UNIT0_LO=", now, " TARGET0_HI=", tgtHi, " TARGET0_LO=", tgt)
+	println("UNIT1_HI=", nowHi, " UNIT1_LO=", now, " TARGET0_HI=", tgtHi, " TARGET0_LO=", tgt)
 }
 
 // initSystimerTick configures SYSTIMER TARGET0 to generate periodic interrupts every 10ms
 // and routes it to a CPU interrupt channel via the Interrupt Matrix.
 func initSystimerTick() {
 	const systimerClockHz = 80_000_000 // assumed SYSTIMER clock
-	const tickPeriodNs = 10_000_000    // 10ms
+	const tickPeriodNs = 1_000_000     // 1ms (для быстрого тестирования)
 	const cpuInterruptForSystimer = 23 // CPU-level interrupt line (avoid pending 20)
 	const debugSkipISRRegistration = false
 
@@ -337,7 +450,7 @@ func initSystimerTick() {
 	esp.SYSTIMER.SetCONF_TIMER_UNIT1_WORK_EN(1)
 	println("SYST step4 clocks on")
 
-	// Configure periodic mode on UNIT1 (commonly used for alarms) and set period
+	// Configure periodic mode on UNIT1 for TARGET0 and set period
 	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_TIMER_UNIT_SEL(1)
 	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD_MODE(1)
 	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD(periodTicks)
@@ -354,19 +467,21 @@ func initSystimerTick() {
 		println("SYST step8 skipped isr registration (debug)")
 	}
 
-	// Program first shot: latch UNIT0, set TARGET0 = now + period, load, enable INT
-	esp.SYSTIMER.SetUNIT0_OP_TIMER_UNIT0_UPDATE(1)
-	// read latched now (low then hi)
-	nowLo := esp.SYSTIMER.UNIT0_VALUE_LO.Get()
-	nowHi := esp.SYSTIMER.UNIT0_VALUE_HI.Get()
+	// Program first shot: latch UNIT1, wait valid, set TARGET0 = now + period, load, enable INT
+	esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
+	for esp.SYSTIMER.GetUNIT1_OP_TIMER_UNIT1_VALUE_VALID() == 0 {
+	}
+	// read latched UNIT1 now (low then hi)
+	nowLo := esp.SYSTIMER.UNIT1_VALUE_LO.Get()
+	nowHi := esp.SYSTIMER.UNIT1_VALUE_HI.Get()
 	// compute target = now + periodTicks
 	tgtLo := nowLo + periodTicks
 	tgtHi := nowHi
 	if tgtLo < nowLo {
 		tgtHi++
 	}
+	esp.SYSTIMER.SetTARGET0_HI_TIMER_TARGET0_HI(tgtHi & 0xFFFFF)
 	esp.SYSTIMER.SetTARGET0_LO(tgtLo)
-	esp.SYSTIMER.SetREAL_TARGET0_HI_TARGET0_HI_RO(tgtHi & 0xFFFFF)
 	esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1)
 	// Clear any pending status and enable SYSTIMER interrupt bit
 	esp.SYSTIMER.INT_CLR.Set(1 << 0)
@@ -420,6 +535,22 @@ func initSystimerTick() {
 		intr2 := device.AsmFull("rsr.interrupt {}", nil)
 		println("SYST step12 INTENABLE=", uint32(uintptr(ien2)), " INTERRUPT=", uint32(uintptr(intr2)))
 
+		// Rearm comparator relative to current UNIT1 time (avoid past target)
+		esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
+		for esp.SYSTIMER.GetUNIT1_OP_TIMER_UNIT1_VALUE_VALID() == 0 {
+		}
+		rNowLo := esp.SYSTIMER.UNIT1_VALUE_LO.Get()
+		rNowHi := esp.SYSTIMER.UNIT1_VALUE_HI.Get()
+		rTgtLo := rNowLo + periodTicks
+		rTgtHi := rNowHi
+		if rTgtLo < rNowLo {
+			rTgtHi++
+		}
+		esp.SYSTIMER.SetTARGET0_HI_TIMER_TARGET0_HI(rTgtHi & 0xFFFFF)
+		esp.SYSTIMER.SetTARGET0_LO(rTgtLo)
+		esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1)
+		println("SYST step12 rearm: nowHI=", rNowHi, " nowLO=", rNowLo, " tgtHI=", rTgtHi, " tgtLO=", rTgtLo)
+
 		// Drop to INTLEVEL=1 first, then 0 (avoid immediate burst)
 		ps1 := device.AsmFull("rsr.ps {}", nil)
 		ps1 &^= 0x0F
@@ -455,4 +586,33 @@ func initDebugPin41() {
 	debugPin.Configure(machine.PinConfig{Mode: machine.PinOutput})
 	debugPin.Low()
 	gpio41State = 0
+}
+
+// dumpVectorTable prints critical vector table and CPU interrupt state
+func dumpVectorTable() {
+	// Read VECBASE - base address of the vector table
+	vecbase := device.AsmFull("rsr.vecbase {}", nil)
+
+	// Read CPU interrupt control registers (NOTE: rsr.interrupt causes hangs, skip it!)
+	ps := device.AsmFull("rsr.ps {}", nil)
+	intEna := device.AsmFull("rsr.intenable {}", nil)
+	exccause := device.AsmFull("rsr.exccause {}", nil)
+	epc1 := device.AsmFull("rsr.epc1 {}", nil)
+
+	println("=== VECTOR TABLE DEBUG ===")
+	println("VECBASE=", uint32(uintptr(vecbase)))
+	println("PS=", uint32(uintptr(ps)), " (INTLEVEL=", uint32(uintptr(ps)&0x0F), ")")
+	println("INTENABLE=", uint32(uintptr(intEna)))
+	println("EXCCAUSE=", uint32(uintptr(exccause)))
+	println("EPC1=", uint32(uintptr(epc1)))
+
+	// Print interrupt matrix mapping for SYSTIMER
+	mapVal := esp.INTERRUPT_CORE0.GetSYSTIMER_TARGET0_INT_MAP()
+	println("SYSTIMER_TARGET0 -> CPU_INT", mapVal)
+
+	// Print SYSTIMER status
+	st := esp.SYSTIMER.INT_ST.Get()
+	ena := esp.SYSTIMER.INT_ENA.Get()
+	println("SYSTIMER: INT_ST=", st, " INT_ENA=", ena)
+	println("==========================")
 }

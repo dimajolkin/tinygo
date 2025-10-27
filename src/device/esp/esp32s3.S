@@ -15,12 +15,15 @@
 
 .section .text.call_start_cpu0
 .global call_start_cpu0
+
 call_start_cpu0:
 
     // We need to set the stack pointer to a different value. This is somewhat
     // complicated in the Xtensa architecture. The code below is a modified
     // version of the following code:
     // https://github.com/espressif/esp-idf/blob/c77c4ccf/components/xtensa/include/xt_instr_macros.h#L47
+
+
 
     // Disable WOE.
     rsr.ps a2

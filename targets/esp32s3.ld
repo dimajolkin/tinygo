@@ -111,7 +111,7 @@ _globals_end = _ebss;
 _heap_start = _ebss;
 _heap_end = _ebss + 64K;
 
-_stack_size = 8K;
+_stack_size = 16K;  /* Increased for interrupt handling */
 
 /* From ESP-IDF:
  * components/esp_rom/esp32s3/ld/esp32s3.rom.newlib-funcs.ld

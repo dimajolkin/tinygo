@@ -49,7 +49,7 @@ _frxt_int_enter:
     // Разрешить более высокие уровни прерываний
     // PS регистр содержит INTLEVEL в битах [3:0]
     // Установить INTLEVEL на (уровень - 1)
-    rsr.ps  a3
+    rsr     a3, PS
     movi    a4, 0xFFFFFFF0       // очистить младшие 4 бита INTLEVEL
     and     a3, a3, a4
 
@@ -61,7 +61,7 @@ _frxt_int_enter:
     // Объединить новый уровень с PS и разрешить прерывания от уровня 0
     // (INTLEVEL = max(0, level-1))
     or      a3, a3, a2
-    wsr.ps  a3
+    wsr     a3, PS
     rsync
     
     ret
@@ -99,67 +99,127 @@ _frxt_int_exit:
     ret
 
 /*
- * _xt_level1_int_handler - Основной обработчик прерывания уровня 1
+ * _xt_level1_int_handler_entry - Основной обработчик прерывания уровня 1
  * 
  * Назначение:
  *   Основной обработчик для прерываний уровня 1 (и выше)
+ *   Вызывается из _xt_lowint1, где уже сохранены A0, A1(SP), PS, PC
  *   
  * Входные параметры:
- *   A0 = адрес возврата
- *   PS = program status (с сохраненным INTLEVEL)
- *   EPC1 = адрес инструкции, которая была прервана
+ *   sp = указатель на стек-фрейм с сохраненным минимальным контекстом
+ *   [sp+XT_STK_A0] = оригинальный A0
+ *   [sp+XT_STK_A1] = оригинальный SP
+ *   [sp+XT_STK_PS] = оригинальный PS
+ *   [sp+XT_STK_PC] = оригинальный PC (из EPC_1)
  *   
  * Действия:
- *   1. Сохранить минимальный контекст
- *   2. Определить источник прерывания
- *   3. Вызвать _frxt_int_enter()
- *   4. Вызвать обработчик (Go код)
- *   5. Вызвать _frxt_int_exit()
- *   6. Восстановить контекст и вернуться
+ *   1. Сохранить остальные регистры (A2-A15, SAR, EXCCAUSE, etc)
+ *   2. Вызвать _frxt_int_enter()
+ *   3. Вызвать обработчик (Go код)
+ *   4. Вызвать _frxt_int_exit()
+ *   5. Восстановить все регистры и вернуться через _xt_user_exit
  */
-.section .text._xt_level1_int_handler,"ax",@progbits
+.section .text._xt_level1_int_handler_entry,"ax",@progbits
 .align 4
-.global _xt_level1_int_handler
-.type _xt_level1_int_handler,@function
+.global _xt_level1_int_handler_entry
+.type _xt_level1_int_handler_entry,@function
 
-_xt_level1_int_handler:
-    // Spill all windows if WOE is enabled
-    SPILL_ALL_WINDOWS
-    // Сохранить полный контекст вызываемого кода
-    call4   _xt_context_save        // a2 = &контекст, sp уменьшен на 112
-
-    // Сохранить указатель на контекст на стек (доп. 4 байта)
-    addi    sp, sp, -4
-    s32i    a2, sp, 0
-
-    // Вход во фрейм прерывания (управление уровнем/вложенностью)
-    movi    a2, 1                   // уровень прерывания (1)
-    call4   _frxt_int_enter
-
-    // Отладка: прочитать INTENABLE/INTERRUPT и вывести через ROM putc пока не используем
-    // (Оставлено закомментированным, чтобы не зависеть от ROM)
-    // rsr.intenable a3
-    // rsr.interrupt a4
-
-    // Вызвать основной обработчик (Go код)
-    call4   handleInterrupt
-
-    // Выход из фрейма прерывания
-    call4   _frxt_int_exit
-
-    // Debug GPIO41 low on ISR exit (optional)
-    // movi    a3, 0x6000401C         // GPIO_OUT_W1TC_REG address (check SoC)
-    // movi    a4, (1 << 9)
-    // s32i    a4, a3, 0
-
-    // Восстановить указатель на контекст и освободить слот
-    l32i    a2, sp, 0
-    addi    sp, sp, 4
-
-    // Восстановить полный контекст и вернуться через RFE
-    call4   _xt_context_restore_rfe
+_xt_level1_int_handler_entry:
+    /* Minimal context (A0, A1, PS, PC, EXIT) already saved by _xt_lowint1
+       Now save the rest: A2-A15 and special registers */
+    
+    /* Save A2-A15 */
+    s32i    a2, sp, XT_STK_A2
+    s32i    a3, sp, XT_STK_A3
+    s32i    a4, sp, XT_STK_A4
+    s32i    a5, sp, XT_STK_A5
+    s32i    a6, sp, XT_STK_A6
+    s32i    a7, sp, XT_STK_A7
+    s32i    a8, sp, XT_STK_A8
+    s32i    a9, sp, XT_STK_A9
+    s32i    a10, sp, XT_STK_A10
+    s32i    a11, sp, XT_STK_A11
+    s32i    a12, sp, XT_STK_A12
+    s32i    a13, sp, XT_STK_A13
+    s32i    a14, sp, XT_STK_A14
+    s32i    a15, sp, XT_STK_A15
+    
+    /* Save special registers */
+    rsr     a2, SAR
+    s32i    a2, sp, XT_STK_SAR
+    
+    rsr     a2, EXCCAUSE
+    s32i    a2, sp, XT_STK_EXCCAUSE
+    
+    rsr     a2, EXCVADDR
+    s32i    a2, sp, XT_STK_EXCVADDR
+    
+    rsr     a2, LBEG
+    s32i    a2, sp, XT_STK_LBEG
+    
+    rsr     a2, LEND
+    s32i    a2, sp, XT_STK_LEND
+    
+    rsr     a2, LCOUNT
+    s32i    a2, sp, XT_STK_LCOUNT
+    
+    /* Call RTOS interrupt entry hook */
+    movi    a2, 1                           /* interrupt level 1 */
+    call0   _frxt_int_enter
+    
+    /* Set up PS for C code: enable interrupts above level 1, clear EXCM */
+    movi    a0, 0x00000001 | 0x00000020     /* PS_INTLEVEL(1) | PS_UM */
+    wsr     a0, PS
+    rsync
+    
+    /* DEBUG: Mark entry to ISR (3 nops for debugger breakpoint) */
     nop
     nop
+    nop
+    
+    /* Call the Go interrupt handler */
+    call0   handleInterrupt
+    
+    /* DEBUG: Mark return from handleInterrupt (3 nops) */
+    nop
+    nop
+    nop
+    
+    /* Call RTOS interrupt exit hook */
+    call0   _frxt_int_exit
+    
+    /* Restore special registers */
+    l32i    a2, sp, XT_STK_SAR
+    wsr     a2, SAR
+    
+    l32i    a2, sp, XT_STK_LBEG
+    wsr     a2, LBEG
+    
+    l32i    a2, sp, XT_STK_LEND
+    wsr     a2, LEND
+    
+    l32i    a2, sp, XT_STK_LCOUNT
+    wsr     a2, LCOUNT
+    
+    /* Restore A2-A15 */
+    l32i    a2, sp, XT_STK_A2
+    l32i    a3, sp, XT_STK_A3
+    l32i    a4, sp, XT_STK_A4
+    l32i    a5, sp, XT_STK_A5
+    l32i    a6, sp, XT_STK_A6
+    l32i    a7, sp, XT_STK_A7
+    l32i    a8, sp, XT_STK_A8
+    l32i    a9, sp, XT_STK_A9
+    l32i    a10, sp, XT_STK_A10
+    l32i    a11, sp, XT_STK_A11
+    l32i    a12, sp, XT_STK_A12
+    l32i    a13, sp, XT_STK_A13
+    l32i    a14, sp, XT_STK_A14
+    l32i    a15, sp, XT_STK_A15
+    
+    /* Jump to exit point (restores A0, A1, PS, PC and does RFE) */
+    l32i    a0, sp, XT_STK_EXIT
+    jx      a0
 
 /*
  * _xt_unhandled_exception - Обработчик необработанного исключения
@@ -183,24 +243,47 @@ _xt_level1_int_handler:
 .type _xt_unhandled_exception,@function
 
 _xt_unhandled_exception:
-    // Сохранить полный контекст для отладки
-    call4   _xt_context_save    // a2 = &контекст
+    /* Save minimal context on stack */
+    addi    sp, sp, -XT_STK_FRMSZ           /* allocate stack frame */
     
-    // Сохранить указатель на контекст
-    mov     a3, a2
+    /* Save all registers */
+    s32i    a0, sp, XT_STK_A0
+    s32i    a1, sp, XT_STK_A1
+    s32i    a2, sp, XT_STK_A2
+    s32i    a3, sp, XT_STK_A3
+    s32i    a4, sp, XT_STK_A4
+    s32i    a5, sp, XT_STK_A5
+    s32i    a6, sp, XT_STK_A6
+    s32i    a7, sp, XT_STK_A7
+    s32i    a8, sp, XT_STK_A8
+    s32i    a9, sp, XT_STK_A9
+    s32i    a10, sp, XT_STK_A10
+    s32i    a11, sp, XT_STK_A11
+    s32i    a12, sp, XT_STK_A12
+    s32i    a13, sp, XT_STK_A13
+    s32i    a14, sp, XT_STK_A14
+    s32i    a15, sp, XT_STK_A15
     
-    // Получить информацию об исключении
-    rsr.exccause a2             // a2 = код исключения
-    rsr.excvaddr a4             // a4 = адрес исключения
-    rsr.epc1 a5                 // a5 = PC исключения
+    /* Save exception info */
+    rsr     a2, EXCCAUSE            /* a2 = exception cause */
+    s32i    a2, sp, XT_STK_EXCCAUSE
     
-    // Вызвать Go функцию обработчика
-    // handleException(exccause uint32, excvaddr uint32, epc uint32)
-    call4   handleException
+    rsr     a3, EXCVADDR            /* a3 = exception address */
+    s32i    a3, sp, XT_STK_EXCVADDR
     
-    // Если вернулись, зациклиться (halt)
+    rsr.epc1 a4                     /* a4 = exception PC (SR=177) */
+    s32i    a4, sp, XT_STK_PC
+    
+    rsr     a5, PS                  /* a5 = PS */
+    s32i    a5, sp, XT_STK_PS
+    
+    /* Call Go exception handler
+       handleException(exccause uint32, excvaddr uint32, epc uint32) */
+    call0   handleException
+    
+    /* If returned, halt */
 .exception_halt_loop:
-    j       .exception_halt_loop // Бесконечный цикл
+    j       .exception_halt_loop    /* infinite loop */
 
 /*
  * _xt_check_interrupt_level - Получить текущий уровень прерывания
@@ -214,8 +297,8 @@ _xt_unhandled_exception:
 .type _xt_check_interrupt_level,@function
 
 _xt_check_interrupt_level:
-    rsr.ps  a2
-    movi    a3, PS_INTLEVEL_MASK
+    rsr     a2, PS
+    movi    a3, 0x0F                  // PS_INTLEVEL_MASK
     and     a2, a2, a3                // Извлечь INTLEVEL [3:0]
     ret
 
@@ -231,7 +314,7 @@ _xt_check_interrupt_level:
 .type _xt_check_interrupt_status,@function
 
 _xt_check_interrupt_status:
-    rsr.interrupt a2            // a2 = регистр INTERRUPT
+    rsr     a2, INTERRUPT       // a2 = регистр INTERRUPT
     ret
 
 /*
@@ -246,7 +329,7 @@ _xt_check_interrupt_status:
 .type _xt_set_interrupt_mask,@function
 
 _xt_set_interrupt_mask:
-    wsr.intenable a2
+    wsr     a2, INTENABLE
     rsync
     ret
 
@@ -262,5 +345,5 @@ _xt_set_interrupt_mask:
 .type _xt_get_interrupt_mask,@function
 
 _xt_get_interrupt_mask:
-    rsr.intenable a2
+    rsr     a2, INTENABLE
     ret
