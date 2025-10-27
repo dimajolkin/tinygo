@@ -136,7 +136,35 @@ func main() {
 	println(">>> Final IsrCount=", finalCount)
 
 	if finalCount == 0 {
-		println("FATAL: No ISR fired! Diagnostic dump:")
+		println("FATAL: No ISR fired!")
+
+		// Test 1: Call handleInterrupt directly from Go (bypasses ALL ASM)
+		println("\nTest 1: Direct call to handleInterrupt()...")
+		oldCount := esp.IsrCount
+		esp.HandleInterruptDirect() // Will add this function
+		newCount := esp.IsrCount
+		println("  Before:", oldCount, " After:", newCount)
+		if newCount > oldCount {
+			println("  SUCCESS! handleInterrupt works!")
+		} else {
+			println("  FAILED! handleInterrupt doesn't increment counter!")
+		}
+
+		// Test 2: Software interrupt (tests vector table)
+		println("\nTest 2: Software interrupt on CPU_INT 23...")
+		device.AsmFull("wsr.intset {v}", map[string]interface{}{"v": uintptr(1 << 23)})
+		device.AsmFull("rsync", nil)
+		for j := 0; j < 1000000; j++ {
+		}
+		swCount := esp.IsrCount
+		println("  After SW interrupt: IsrCount=", swCount)
+		if swCount > newCount {
+			println("  SUCCESS! Vector table works!")
+		} else {
+			println("  FAILED! Vector table doesn't call handleInterrupt!")
+		}
+
+		println("\nDiagnostic dump:")
 
 		// Check SYSTIMER state
 		esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
