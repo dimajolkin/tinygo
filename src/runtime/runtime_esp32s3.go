@@ -585,11 +585,18 @@ func main() {
 	// Initialize memory subsystems (MMU, cache buses, autoload)
 	// This complements the basic cache init done in esp32s3.S
 	// Reference: ESP-IDF bootloader_esp32s3.c and cache_hal_init()
-	esp.InitMemorySubsystems()
+	//esp.InitMemorySubsystems()
 
 	// Initialize GPIO and SPI peripherals early (GPIO matrix might be already initialized by ROM)
 	initGPIOPeripherals()
 	initSPIPeripherals()
+
+	// Initialize USB Serial/JTAG BEFORE using it
+	//initUSBSerial()
+
+	// Initialize USB Serial/JTAG registers (critical!)
+	// Reference: ESP-IDF components/hal/esp32s3/include/hal/usb_serial_jtag_ll.h
+	//initUSBSerialRegisters()
 
 	// Initialize UART after USB configuration
 	machine.USBCDC.Configure(machine.UARTConfig{BaudRate: 115200})
@@ -602,7 +609,9 @@ func main() {
 	for i := 0; i < 10000; i++ {
 		print(".")
 	}
-	print("\n")
+	//print("\n")
+
+	testPrintSubsystem()
 
 	abort()
 	// Configure GPIO41 as debug output (toggled by SYSTIMER ISR)
@@ -754,6 +763,54 @@ func initGPIOPeripherals() {
 	// Also enable GPIO sigma delta clock if needed
 	esp.GPIO_SD.SetSIGMADELTA_CG_CLK_EN(1)
 	esp.GPIO_SD.SetSIGMADELTA_MISC_FUNCTION_CLK_EN(1)
+}
+
+// initUSBSerialRegisters ensures USB Serial/JTAG is properly configured
+// ROM bootloader already initializes USB, so we just ensure critical bits are set
+func initUSBSerialRegisters() {
+	// NOTE: ROM bootloader already:
+	// - Enabled USB_DEVICE clock (PERIP_CLK_EN1)
+	// - Released USB from reset
+	// - Basic endpoint configuration
+
+	// We only ensure these critical registers are set (idempotent operations):
+
+	// 1. Ensure USB peripheral clock is enabled (ROM already did this, but safe to set again)
+	esp.SYSTEM.SetPERIP_CLK_EN1_USB_DEVICE_CLK_EN(1)
+
+	// 2. ⚠️ DO NOT RESET USB! ROM already initialized it and host is connected
+	// Resetting would break the connection!
+	// esp.SYSTEM.SetPERIP_RST_EN1_USB_DEVICE_RST(1) // ❌ DON'T DO THIS
+
+	// 3. Ensure USB internal clock is enabled
+	// Reference: ESP-IDF usb_serial_jtag_ll.h - usb_serial_jtag_ll_clk_enable()
+	esp.USB_DEVICE.SetMISC_CONF_CLK_EN(1)
+
+	// 4. Ensure USB memory is powered up (not in power-down mode)
+	// Reference: ESP-IDF usb_serial_jtag_ll.h - usb_serial_jtag_ll_phy_enable()
+	esp.USB_DEVICE.SetMEM_CONF_USB_MEM_PD(0) // 0 = Power ON, 1 = Power DOWN
+
+	// Small delay for register writes to take effect
+	for i := 0; i < 100; i++ {
+		device.Asm("nop")
+	}
+}
+
+// initUSBSerial initializes USB Serial/JTAG peripheral
+// Based on ESP-IDF USB Serial/JTAG driver initialization
+func initUSBSerial() {
+	// Enable USB Serial/JTAG peripheral clock
+	// Reference: ESP-IDF components/hal/esp32s3/include/hal/usb_serial_jtag_ll.h
+	esp.SYSTEM.SetPERIP_CLK_EN1_USB_DEVICE_CLK_EN(1)
+
+	// Release USB Serial/JTAG from reset
+	esp.SYSTEM.SetPERIP_RST_EN1_USB_DEVICE_RST(1) // Assert reset
+	esp.SYSTEM.SetPERIP_RST_EN1_USB_DEVICE_RST(0) // Release reset
+
+	// Small delay for peripheral stabilization
+	for i := 0; i < 1000; i++ {
+		device.Asm("nop")
+	}
 }
 
 // initSPIPeripherals initializes SPI2 and SPI3 peripherals exactly like ESP-IDF

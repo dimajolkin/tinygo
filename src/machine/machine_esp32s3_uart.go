@@ -61,7 +61,7 @@ type USB_DEVICE struct {
 }
 
 var (
-	_USBCDC = USB_DEVICE{
+	_USBCDC = &USB_DEVICE{
 		Bus: esp.USB_DEVICE,
 	}
 
@@ -78,37 +78,41 @@ type Serialer interface {
 	RTS() bool
 }
 
-func (usbdev USB_DEVICE) Configure(config UARTConfig) error {
+func (usbdev *USB_DEVICE) Configure(config UARTConfig) error {
 	// USB Serial/JTAG is initialized by runtime, no additional config needed
 	return nil
 }
 
-func (usbdev USB_DEVICE) WriteByte(c byte) error {
-	// Implementation based on ESP32-C3 (same USB Serial/JTAG hardware)
-	// Wait for TX FIFO space - blocking write
-	for usbdev.Bus.GetEP1_CONF_SERIAL_IN_EP_DATA_FREE() == 0 {
-		// Wait for buffer space
-		// This blocks if host not connected, which is expected behavior
+func (usbdev *USB_DEVICE) WriteByte(c byte) error {
+	// Host is connected - wait for TX FIFO space with reasonable timeout
+	timeout := 10000 // Generous timeout for connected host
+	for usbdev.Bus.GetEP1_CONF_SERIAL_IN_EP_DATA_FREE() == 0 && timeout > 0 {
+		timeout--
 	}
 
-	// Write byte to USB Serial/JTAG FIFO
+	// Even with host connected, don't hang forever
+	if timeout == 0 {
+		return nil
+	}
+
+	// Write byte to USB Serial/JTAG endpoint
 	usbdev.Bus.SetEP1_RDWR_BYTE(uint32(c))
 
-	// Trigger transmission (hardware auto-clears WR_DONE when complete)
-	usbdev.flush()
+	// Trigger transmission
+	usbdev.Bus.SetEP1_CONF_WR_DONE(1)
 
 	return nil
 }
 
 // isHostConnected checks if USB Serial/JTAG host is actually connected
-func (usbdev USB_DEVICE) isHostConnected() bool {
+func (usbdev *USB_DEVICE) isHostConnected() bool {
 	// Check USB device state - if configured, host is likely connected
 	// ESP32-S3 USB Serial/JTAG reports connection status via device state
 	return usbdev.Bus.GetEP1_CONF_SERIAL_IN_EP_DATA_FREE() > 0 ||
 		usbdev.Bus.GetEP1_CONF_SERIAL_OUT_EP_DATA_AVAIL() == 0
 }
 
-func (usbdev USB_DEVICE) Write(data []byte) (n int, err error) {
+func (usbdev *USB_DEVICE) Write(data []byte) (n int, err error) {
 	for _, c := range data {
 		err = usbdev.WriteByte(c)
 		if err != nil {
@@ -119,27 +123,27 @@ func (usbdev USB_DEVICE) Write(data []byte) (n int, err error) {
 	return n, nil
 }
 
-func (usbdev USB_DEVICE) ReadByte() (byte, error) {
+func (usbdev *USB_DEVICE) ReadByte() (byte, error) {
 	// TODO: Implement USB Serial/JTAG input reading
 	return 0, errors.New("ReadByte not implemented")
 }
 
-func (usbdev USB_DEVICE) Buffered() int {
+func (usbdev *USB_DEVICE) Buffered() int {
 	// Return number of bytes available to read
 	return int(usbdev.Bus.GetEP1_CONF_SERIAL_OUT_EP_DATA_AVAIL())
 }
 
-func (usbdev USB_DEVICE) DTR() bool {
+func (usbdev *USB_DEVICE) DTR() bool {
 	// Data Terminal Ready - not applicable for USB Serial/JTAG
 	return false
 }
 
-func (usbdev USB_DEVICE) RTS() bool {
+func (usbdev *USB_DEVICE) RTS() bool {
 	// Request To Send - not applicable for USB Serial/JTAG
 	return false
 }
 
-func (usbdev USB_DEVICE) flush() {
+func (usbdev *USB_DEVICE) flush() {
 	// Force transmission of any buffered data
 	usbdev.Bus.SetEP1_CONF_WR_DONE(1)
 }
