@@ -500,26 +500,70 @@ func debugGPIO(n int) {
 	*(*uint32)(unsafe.Pointer(uintptr(0x60004008))) = (1 << n)  // GPIO_OUT_W1TS_REG: set GPIO4 high
 }
 
+// disableWatchdogs отключает все аппаратные watchdog таймеры для предотвращения
+// автоматического сброса системы во время разработки и отладки.
+//
+// Watchdog (сторожевой таймер) - это аппаратный механизм защиты от зависаний.
+// Если программа не "кормит" (не сбрасывает) watchdog в течение заданного времени,
+// то процессор автоматически перезагружается. Это защищает от бесконечных циклов
+// и других критических сбоев в production коде.
+//
+// ESP32-S3 имеет несколько типов watchdog'ов:
+//
+// 1. TIMG0/TIMG1 MWDT (Main Watchdog Timer)
+//   - Watchdog таймеры в группах таймеров 0 и 1
+//   - Используются для защиты основного кода приложения
+//   - Timeout по умолчанию: ~2 секунды
+//
+// 2. RTC WDT (RTC Watchdog Timer)
+//   - Работает от RTC часов (низкочастотных)
+//   - Активен даже в режимах глубокого сна
+//   - Используется для защиты загрузки и инициализации
+//   - Timeout по умолчанию: ~9 секунд
+//
+// 3. Super Watchdog (SWD)
+//   - Дополнительный уровень защиты
+//   - Работает независимо от основных watchdog'ов
+//   - Может быть отключен только с правильным ключом разблокировки
+//
+// ВАЖНО: В production коде watchdog'и должны быть ВКЛЮЧЕНЫ и регулярно
+// сбрасываться (feed) для обеспечения надёжности системы!
+//
+// Для отключения watchdog'а нужна последовательность:
+// 1. Записать магический ключ в регистр WDTWPROTECT (write protect)
+// 2. Записать 0 в регистр WDTCONFIG0 для отключения
+// 3. (Опционально) Заблокировать регистр обратно
+//
+// Reference: ESP32-S3 Technical Reference Manual, Chapter "Watchdog Timers"
+func disableWatchdogs() {
+	// Disable Timer Group 0 Main Watchdog Timer (TIMG0 MWDT)
+	// Этот watchdog защищает код на CPU0
+	esp.TIMG0.WDTWPROTECT.Set(0x50D83AA1) // Unlock: Magic key для разблокировки
+	esp.TIMG0.WDTCONFIG0.Set(0)           // Disable: Отключить все стадии watchdog
+
+	// Disable Timer Group 1 Main Watchdog Timer (TIMG1 MWDT)
+	// Этот watchdog может использоваться для дополнительной защиты
+	esp.TIMG1.WDTWPROTECT.Set(0x50D83AA1) // Unlock: Тот же ключ разблокировки
+	esp.TIMG1.WDTCONFIG0.Set(0)           // Disable: Отключить все стадии watchdog
+
+	// Disable RTC Watchdog Timer (RTC WDT)
+	// Этот watchdog работает от RTC часов и активен при загрузке
+	// ROM bootloader ESP32-S3 включает его автоматически для защиты загрузки
+	esp.RTC_CNTL.WDTWPROTECT.Set(0x50D83AA1) // Unlock: Разблокировать RTC WDT
+	esp.RTC_CNTL.WDTCONFIG0.Set(0)           // Disable: Полностью отключить
+
+	// CRITICAL: Super Watchdog (SWD) - Enable AUTO_FEED (like ESP-IDF does)
+	// Super watchdog CANNOT be fully disabled, must use auto-feed instead!
+	// Reference: ESP-IDF bootloader_super_wdt_auto_feed() in bootloader_esp32s3.c
+	esp.RTC_CNTL.SWD_WPROTECT.Set(0x8F1D312A)                             // Unlock: Специальный ключ для SWD
+	esp.RTC_CNTL.SWD_CONF.SetBits(esp.RTC_CNTL_SWD_CONF_SWD_AUTO_FEED_EN) // Enable auto-feed (NOT disable!)
+	esp.RTC_CNTL.SWD_WPROTECT.Set(0)                                      // Lock back
+}
+
 //export main
 func main() {
-	// DEBUG: Signal entry to main() via GPIO4
-	debugGPIO(4)
-
-	// Disable Timer Group watchdogs (unlock then disable)
-	// TIMG0
-	esp.TIMG0.WDTWPROTECT.Set(0x50D83AA1)
-	esp.TIMG0.WDTCONFIG0.Set(0)
-	// TIMG1
-	esp.TIMG1.WDTWPROTECT.Set(0x50D83AA1)
-	esp.TIMG1.WDTCONFIG0.Set(0)
-
-	// Disable RTC watchdog.
-	esp.RTC_CNTL.WDTWPROTECT.Set(0x50D83AA1)
-	esp.RTC_CNTL.WDTCONFIG0.Set(0)
-
-	// Disable super watchdog.
-	esp.RTC_CNTL.SWD_WPROTECT.Set(0x8F1D312A)
-	esp.RTC_CNTL.SWD_CONF.Set(esp.RTC_CNTL_SWD_CONF_SWD_DISABLE)
+	// IMPORTANT: Do NOTHING before clearbss() that requires initialized Go variables!
+	// The .bss section (zero-initialized globals) is not ready yet.
 
 	// Change CPU frequency from 20MHz to 80MHz, by switching from the XTAL to
 	// the PLL clock source (see table "CPU Clock Frequency" in the reference
@@ -534,6 +578,10 @@ func main() {
 
 	clearbss()
 
+	// CRITICAL: Disable watchdogs AFTER clearbss() when Go structures are ready
+	// esp.TIMG0/TIMG1/RTC_CNTL are global pointers that need .bss to be initialized
+	disableWatchdogs()
+
 	// Initialize memory subsystems (MMU, cache buses, autoload)
 	// This complements the basic cache init done in esp32s3.S
 	// Reference: ESP-IDF bootloader_esp32s3.c and cache_hal_init()
@@ -547,23 +595,8 @@ func main() {
 	machine.USBCDC.Configure(machine.UARTConfig{BaudRate: 115200})
 	machine.InitSerial()
 
-	// DEBUG: Signal UART initialized via GPIO5
-	debugGPIO(5)
-
-	// VECBASE is already set in call_start_cpu0 (esp32s3.S line 58-61)
-	// to _vector_base (0x40374000) - no need to set it again
-	println(">>> VECBASE was set in call_start_cpu0 to _vector_base (0x40374000)")
-	println(">>> Our vector table is ready for interrupts!")
-
-	// Validate memory subsystems initialization
-	esp.ValidateMemoryInit()
-	
 	// Validate vector table layout (ESP-IDF compliance)
-	validateVectorTableLayout()
-
-	// DEBUG: Signal VECBASE setup complete via GPIO6
-	debugGPIO(6)
-
+	//validateVectorTableLayout()
 	initTimer()
 
 	for i := 0; i < 10000; i++ {
@@ -571,11 +604,19 @@ func main() {
 	}
 	print("\n")
 
+	println("SUCCESS! System is stable, entering test loop...")
+	esp.ValidateMemoryInit()
+
+	for {
+	}
+
+	//dumpCacheState("After basic init")
+
 	// Initialize system tick using SYSTIMER (10ms period)
-	initSystimerTick()
+	//initSystimerTick()
 
 	// Configure GPIO41 as debug output (toggled by SYSTIMER ISR)
-	initDebugPin41()
+	//initDebugPin41()
 
 	// Prepare SYSTIMER and enable interrupts
 	prepareInterruptMonitoring()
@@ -1161,4 +1202,20 @@ func hexString(val uint32) string {
 		val >>= 4
 	}
 	return string(result)
+}
+
+// dumpCacheState выводит текущее состояние cache регистров для отладки
+func dumpCacheState(tag string) {
+
+	// Use constants from memory_init_esp32s3.go
+	dcache := volatile.LoadUint32((*uint32)(unsafe.Pointer(uintptr(esp.EXTMEM_DCACHE_CTRL_REG))))
+	icache := volatile.LoadUint32((*uint32)(unsafe.Pointer(uintptr(esp.EXTMEM_ICACHE_CTRL_REG))))
+
+	println(">>> [CACHE DEBUG]", tag)
+	println("    DCACHE_CTRL =", dcache)
+	println("      Enable    =", (dcache&esp.EXTMEM_CACHE_ENABLE_BIT) != 0)
+	println("      Invalidate=", (dcache&(1<<1)) != 0)
+	println("    ICACHE_CTRL =", icache)
+	println("      Enable    =", (icache&esp.EXTMEM_CACHE_ENABLE_BIT) != 0)
+	println("      Invalidate=", (icache&(1<<1)) != 0)
 }

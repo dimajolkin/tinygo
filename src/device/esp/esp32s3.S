@@ -61,68 +61,42 @@ call_start_cpu0:
      * TinyGo is self-booting without ESP-IDF bootloader.
      * We must initialize cache before accessing Flash.
      * 
-     * Minimal cache init (based on ESP-IDF bootloader):
-     * 1. Disable caches
-     * 2. Invalidate caches  
-     * 3. Enable caches
+     * OPTION 1 (CURRENT): Use ROM_Boot_Cache_Init() - complete init
+     * OPTION 2 (MANUAL): Use individual functions for more control
+     * 
+     * ROM function symbols defined in targets/esp32s3.ld from ESP-IDF.
+     * These functions are in ROM chip memory and always available.
      ******************************************************************/
     
-    // ESP32-S3 cache control registers
-    #define EXTMEM_DCACHE_CTRL_REG    0x3FF43000
-    #define EXTMEM_ICACHE_CTRL_REG    0x3FF43008
-    #define EXTMEM_CACHE_ENABLE       (1 << 0)
-    #define EXTMEM_CACHE_INVALIDATE   (1 << 1)
+    // OPTION 1: Full cache initialization using ROM bootloader function
+    // void ROM_Boot_Cache_Init(void)
+    // This does: invalidate + enable + MMU init + owner init
+    movi a0, ROM_Boot_Cache_Init  // Symbol from linker script
+    callx0 a0
     
-    // Step 1: Disable caches
-    movi a2, EXTMEM_DCACHE_CTRL_REG
-    l32i a3, a2, 0
-    movi a4, ~EXTMEM_CACHE_ENABLE
-    and a3, a3, a4
-    s32i a3, a2, 0
+    /* OPTION 2: Manual initialization (commented out, but can be used)
+    // 1. Invalidate ICache
+    movi a0, Cache_Invalidate_ICache_All
+    callx0 a0
     
-    movi a2, EXTMEM_ICACHE_CTRL_REG
-    l32i a3, a2, 0
-    and a3, a3, a4
-    s32i a3, a2, 0
+    // 2. Invalidate DCache
+    movi a0, Cache_Invalidate_DCache_All
+    callx0 a0
     
-    // Step 2: Invalidate caches
-    movi a2, EXTMEM_DCACHE_CTRL_REG
-    l32i a3, a2, 0
-    movi a4, EXTMEM_CACHE_INVALIDATE
-    or a3, a3, a4
-    s32i a3, a2, 0
+    // 3. Initialize MMU (identity mapping for Flash access)
+    movi a0, Cache_MMU_Init
+    callx0 a0
     
-    movi a2, EXTMEM_ICACHE_CTRL_REG
-    l32i a3, a2, 0
-    or a3, a3, a4
-    s32i a3, a2, 0
+    // 4. Enable ICache with autoload=0
+    movi a2, 0                    // autoload = 0 (disabled)
+    movi a0, Cache_Enable_ICache
+    callx0 a0
     
-    // Wait for invalidation complete
-.Lwait_dcache_inv:
-    movi a2, EXTMEM_DCACHE_CTRL_REG
-    l32i a3, a2, 0
-    movi a4, EXTMEM_CACHE_INVALIDATE
-    and a3, a3, a4
-    bnez a3, .Lwait_dcache_inv
-    
-.Lwait_icache_inv:
-    movi a2, EXTMEM_ICACHE_CTRL_REG
-    l32i a3, a2, 0
-    movi a4, EXTMEM_CACHE_INVALIDATE
-    and a3, a3, a4
-    bnez a3, .Lwait_icache_inv
-    
-    // Step 3: Enable caches
-    movi a2, EXTMEM_DCACHE_CTRL_REG
-    l32i a3, a2, 0
-    movi a4, EXTMEM_CACHE_ENABLE
-    or a3, a3, a4
-    s32i a3, a2, 0
-    
-    movi a2, EXTMEM_ICACHE_CTRL_REG
-    l32i a3, a2, 0
-    or a3, a3, a4
-    s32i a3, a2, 0
+    // 5. Enable DCache with autoload=0
+    movi a2, 0                    // autoload = 0 (disabled)
+    movi a0, Cache_Enable_DCache
+    callx0 a0
+    */
     
     // NOTE: Additional memory initialization (MMU, cache bus, autoload)
     // is done in Go code (initMemorySubsystems) after basic cache is ready.

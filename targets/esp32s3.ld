@@ -176,6 +176,14 @@ SECTIONS
         . = ALIGN (4);
         _ebss = ABSOLUTE(.);
     } >DRAM
+    
+    /* CRITICAL: Verify .bss section is within valid DRAM range
+     * ESP32-S3 DRAM: 0x3FC88000 - 0x3FCF0000 (416 KB)
+     * This prevents clearbss() from writing to invalid memory
+     */
+    ASSERT(_sbss >= 0x3FC88000, "ERROR: .bss starts before DRAM region!")
+    ASSERT(_ebss <= 0x3FCF0000, "ERROR: .bss ends after DRAM region!")
+    ASSERT(_sbss < _ebss, "ERROR: .bss section has invalid size!")
 }
 
 /* For the garbage collector.
@@ -210,3 +218,120 @@ __umodsi3 = 0x400008c0;
 __ashldi3 = 0x4000077c;
 __ashrdi3 = 0x40000780;
 __lshrdi3 = 0x40000830;
+
+/* From ESP-IDF:
+ * components/esp_rom/esp32s3/ld/esp32s3.rom.ld
+ * ALL Cache management functions for ESP32-S3 (84 functions total)
+ * These functions are in ROM chip memory and always available.
+ * Total size in ROM: ~4-6 KB, cost in firmware: 0 bytes.
+ */
+
+/* Information functions */
+Cache_Get_ICache_Line_Size = 0x400015fc;
+Cache_Get_DCache_Line_Size = 0x40001608;
+Cache_Get_Mode = 0x40001614;
+Cache_Get_IROM_MMU_End = 0x4000195c;
+Cache_Get_DROM_MMU_End = 0x40001968;
+Cache_Get_Virtual_Addr = 0x400019ec;
+Cache_Get_Memory_BaseAddr = 0x400019f8;
+Cache_Get_Memory_Addr = 0x40001a04;
+Cache_Get_Memory_value = 0x40001a10;
+
+/* Mode configuration */
+Cache_Set_ICache_Mode = 0x40001620;
+Cache_Set_DCache_Mode = 0x4000162c;
+Cache_Set_Default_Mode = 0x40001650;
+Cache_Enable_Defalut_ICache_Mode = 0x4000165c;
+
+/* Cache initialization - ⭐ USED IN TINYGO */
+ROM_Boot_Cache_Init = 0x40001668;
+Cache_Invalidate_ICache_All = 0x400016d4;  /* ⭐ USED */
+Cache_Invalidate_DCache_All = 0x400016e0;  /* ⭐ USED */
+Cache_Enable_ICache = 0x40001878;          /* ⭐ USED */
+Cache_Enable_DCache = 0x40001890;          /* ⭐ USED */
+Cache_Disable_ICache = 0x4000186c;
+Cache_Disable_DCache = 0x40001884;
+
+/* Invalidation, clean, write-back */
+Cache_Invalidate_ICache_Items = 0x40001674;
+Cache_Invalidate_DCache_Items = 0x40001680;
+Cache_Invalidate_Addr = 0x400016b0;
+Cache_Clean_Items = 0x4000168c;
+Cache_Clean_Addr = 0x400016bc;
+Cache_Clean_All = 0x400016ec;
+Cache_WriteBack_Items = 0x40001698;
+rom_Cache_WriteBack_Addr = 0x400016c8;
+Cache_WriteBack_All = 0x400016f8;
+Cache_Op_Addr = 0x400016a4;
+
+/* Bus control */
+Cache_Address_Through_ICache = 0x40001638;
+Cache_Address_Through_DCache = 0x40001644;
+Cache_Mask_All = 0x40001704;
+Cache_UnMask_Dram0 = 0x40001710;
+
+/* Autoload */
+Cache_Config_ICache_Autoload = 0x40001794;
+Cache_Config_DCache_Autoload = 0x400017c4;
+Cache_Config_ICache_Region_Autoload = 0x400017a0;
+Cache_Config_DCache_Region_Autoload = 0x400017d0;
+Cache_Enable_ICache_Autoload = 0x400017ac;
+Cache_Disable_ICache_Autoload = 0x400017b8;
+Cache_Enable_DCache_Autoload = 0x400017dc;
+Cache_Disable_DCache_Autoload = 0x400017e8;
+Cache_Suspend_ICache_Autoload = 0x4000171c;
+Cache_Resume_ICache_Autoload = 0x40001728;
+Cache_Suspend_DCache_Autoload = 0x40001734;
+Cache_Resume_DCache_Autoload = 0x40001740;
+
+/* Preload */
+Cache_Start_ICache_Preload = 0x4000174c;
+Cache_ICache_Preload_Done = 0x40001758;
+Cache_End_ICache_Preload = 0x40001764;
+Cache_Start_DCache_Preload = 0x40001770;
+Cache_DCache_Preload_Done = 0x4000177c;
+Cache_End_DCache_Preload = 0x40001788;
+
+/* Lock/PreLock */
+Cache_Enable_ICache_PreLock = 0x400017f4;
+Cache_Disable_ICache_PreLock = 0x40001800;
+Cache_Lock_ICache_Items = 0x4000180c;
+Cache_Unlock_ICache_Items = 0x40001818;
+Cache_Enable_DCache_PreLock = 0x40001824;
+Cache_Disable_DCache_PreLock = 0x40001830;
+Cache_Lock_DCache_Items = 0x4000183c;
+Cache_Unlock_DCache_Items = 0x40001848;
+Cache_Lock_Addr = 0x40001854;
+Cache_Unlock_Addr = 0x40001860;
+
+/* Suspend/Resume */
+rom_Cache_Suspend_ICache = 0x4000189c;
+Cache_Resume_ICache = 0x400018a8;
+rom_Cache_Suspend_DCache = 0x400018b4;
+Cache_Resume_DCache = 0x400018c0;
+
+/* Freeze */
+rom_Cache_Freeze_ICache_Enable = 0x400018e4;
+Cache_Freeze_ICache_Disable = 0x400018f0;
+rom_Cache_Freeze_DCache_Enable = 0x400018fc;
+Cache_Freeze_DCache_Disable = 0x40001908;
+
+/* MMU functions - ⭐ POTENTIALLY USEFUL */
+Cache_Set_IDROM_MMU_Size = 0x40001914;
+Cache_Set_IDROM_MMU_Info = 0x40001950;
+Cache_Owner_Init = 0x40001974;
+Cache_MMU_Init = 0x40001998;  /* ⭐ Initialize MMU */
+Cache_Ibus_MMU_Set = 0x400019a4;
+Cache_Dbus_MMU_Set = 0x400019b0;
+
+/* Memory occupation */
+Cache_Occupy_ICache_MEMORY = 0x40001980;
+Cache_Occupy_DCache_MEMORY = 0x4000198c;
+Cache_Occupy_Items = 0x400018cc;
+Cache_Occupy_Addr = 0x400018d8;
+
+/* Auxiliary */
+rom_Cache_Count_Flash_Pages = 0x400019bc;
+Cache_Flash_To_SPIRAM_Copy = 0x400019c8;
+Cache_Travel_Tag_Memory = 0x400019d4;
+Cache_Travel_Tag_Memory2 = 0x400019e0;
