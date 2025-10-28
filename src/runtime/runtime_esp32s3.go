@@ -26,6 +26,7 @@ import (
 	"device/esp"
 	"machine"
 	"runtime/interrupt"
+	"runtime/volatile"
 	"unsafe"
 )
 
@@ -33,10 +34,462 @@ import (
 // Note: VECBASE is already set in call_start_cpu0 (esp32s3.S), we just read it here
 func getVecbase() uintptr
 
+// Helper functions for reading/writing special registers
+func readPS() uint32 {
+	var ps uint32
+	device.AsmFull(
+		"rsr.ps a2\n"+
+			"s32i a2, {ptr}, 0",
+		map[string]interface{}{"ptr": uintptr(unsafe.Pointer(&ps))})
+	return ps
+}
+
+func writePS(val uint32) {
+	device.AsmFull("wsr.ps {v}", map[string]interface{}{"v": uintptr(val)})
+}
+
+func readINTERRUPT() uint32 {
+	var interrupt uint32
+	device.AsmFull(
+		"rsr.interrupt a2\n"+
+			"s32i a2, {ptr}, 0",
+		map[string]interface{}{"ptr": uintptr(unsafe.Pointer(&interrupt))})
+	return interrupt
+}
+
+// testDirectCallToHandleInterrupt - Test 1: Direct call to handleInterrupt (bypasses ASM)
+func testDirectCallToHandleInterrupt() {
+	println("\n=== Test 1: Direct call to handleInterrupt() ===")
+	oldCount := esp.IsrCount
+	esp.HandleInterruptDirect() // Will add this function
+	newCount := esp.IsrCount
+	println("  Before:", oldCount, " After:", newCount)
+	if newCount > oldCount {
+		println("  SUCCESS! handleInterrupt works!")
+	} else {
+		println("  FAILED! handleInterrupt doesn't increment counter!")
+	}
+}
+
+// testSoftwareInterrupt - Test 2: Software interrupt via wsr.intset (tests vector table)
+func testSoftwareInterrupt() uint32 {
+	println("\n=== Test 2: Software interrupt on CPU_INT 23 ===")
+
+	vectorEntry := esp.VectorEntryCount
+	swCount := esp.IsrCount
+	beforeGo := esp.IsrCountBeforeGo
+	afterGo := esp.IsrCountAfterGo
+	println("  Before SW interrupt:")
+	println("    VectorEntryCount=", vectorEntry, " (did CPU jump to vector?)")
+	println("    IsrCount=", swCount, " (from Go handleInterrupt)")
+	println("    IsrCountBeforeGo=", beforeGo, " IsrCountAfterGo=", afterGo)
+
+	device.AsmFull("wsr.intset {v}", map[string]interface{}{"v": uintptr(1 << 23)})
+	device.AsmFull("rsync", nil)
+	vectorEntry = esp.VectorEntryCount
+	swCount = esp.IsrCount
+	beforeGo = esp.IsrCountBeforeGo
+	afterGo = esp.IsrCountAfterGo
+
+	println("  After SW interrupt:")
+	println("    VectorEntryCount=", vectorEntry, " (did CPU jump to vector?)")
+	println("    IsrCount=", swCount, " (from Go handleInterrupt)")
+	println("    IsrCountBeforeGo=", beforeGo, " IsrCountAfterGo=", afterGo)
+
+	// Detailed diagnostics
+	if vectorEntry == 0 {
+		println("  FATAL: CPU never jumped to _UserExceptionVector!")
+		println("  Check: VECBASE, vector table placement, interrupt routing")
+	} else if beforeGo == 0 {
+		println("  PROBLEM: Vector entered but crashed before handleInterrupt!")
+		println("  Check: PS register setup, EXCM bit, ASM flow")
+	} else if afterGo == 0 {
+		println("  PROBLEM: handleInterrupt was called but never returned!")
+		println("  Check: handleInterrupt crashes, stack overflow")
+	} else {
+		println("  SUCCESS! Vector table works!")
+	}
+
+	return swCount // Return current count for comparison in Test 3
+}
+
+// testPSRegisterAndWAITI - Test 3: Check PS.INTLEVEL and try WAITI instruction
+func testPSRegisterAndWAITI() {
+	println("\n=== Test 3: PS Register & WAITI ===")
+
+	// Check PS register
+	psBefore := readPS()
+	intlevelBefore := (psBefore >> 0) & 0xF // INTLEVEL is bits 0-3
+	excmBefore := (psBefore >> 4) & 0x1     // EXCM is bit 4
+	println("  PS register: value=", psBefore)
+	println("    INTLEVEL=", intlevelBefore, " (should be 0 for Level-1 interrupts)")
+	println("    EXCM=", excmBefore, " (should be 0)")
+
+	if intlevelBefore >= 1 {
+		println("  WARNING: INTLEVEL >= 1 will block Level-1 interrupts!")
+		println("  Attempting to set INTLEVEL to 0...")
+		psNew := psBefore & ^uint32(0xF) // Clear INTLEVEL bits
+		writePS(psNew)
+		device.AsmFull("rsync", nil)
+		psAfter := readPS()
+		println("  PS after: value=", psAfter, " INTLEVEL=", (psAfter & 0xF))
+	} else {
+		println("  OK: INTLEVEL = 0")
+	}
+
+	// Try software interrupt with WAITI
+	println("\n  Triggering software interrupt and using WAITI...")
+	counterBefore := esp.VectorEntryCount
+
+	device.AsmFull("wsr.intset {v}", map[string]interface{}{"v": uintptr(1 << 23)})
+	device.AsmFull("rsync", nil)
+
+	// Check INTERRUPT register
+	interruptReg := readINTERRUPT()
+	println("  INTERRUPT register:", interruptReg)
+	println("    Bit 23 set?", (interruptReg&(1<<23)) != 0)
+
+	// Execute WAITI - should immediately trigger interrupt if pending
+	println("  Executing WAITI 0 (wait for interrupt)...")
+	device.AsmFull("waiti 0", nil)
+	println("  Returned from WAITI")
+
+	counterAfter := esp.VectorEntryCount
+	println("  VectorEntryCount: before=", counterBefore, " after=", counterAfter)
+
+	if counterAfter > counterBefore {
+		println("  SUCCESS: Vector was called during WAITI!")
+	} else {
+		println("  FAILED: Vector was NOT called during WAITI")
+	}
+}
+
+// testDeepDiagnostics - Test 5: Deep dive into why interrupts don't fire
+func testDeepDiagnostics() {
+	println("\n=== Test 5: DEEP DIAGNOSTICS ===")
+
+	// 1. Check VECBASE using inline ASM (safer)
+	println("\n1. VECBASE CHECK:")
+
+	var vecbaseVal uint32
+	device.AsmFull(
+		"rsr.vecbase a2\n"+
+			"s32i a2, {ptr}, 0",
+		map[string]interface{}{"ptr": uintptr(unsafe.Pointer(&vecbaseVal))})
+
+	println("   VECBASE (via rsr.vecbase) =", vecbaseVal, "(expected 0x40374000)")
+
+	// Check if VECBASE is valid address
+	if vecbaseVal == 0 || vecbaseVal == 0xFFFFFFFF {
+		println("   ERROR: VECBASE is invalid!")
+		println("   VECBASE was NEVER set by call_start_cpu0!")
+		return
+	}
+
+	// Try to read from _vector_base linker symbol
+	linkerVectorBase := uintptr(unsafe.Pointer(&vectorBase))
+	println("   _vector_base (linker) =", uint32(linkerVectorBase))
+
+	if uint32(linkerVectorBase) != vecbaseVal {
+		println("   ERROR: VECBASE != _vector_base!")
+		println("   call_start_cpu0 might not have set VECBASE correctly")
+	}
+
+	// Read first 4 instructions at linker vector base (safer than vecbase)
+	println("   First 16 bytes at _vector_base:")
+	for i := 0; i < 4; i++ {
+		addr := linkerVectorBase + uintptr(i*4)
+		instr := *(*uint32)(unsafe.Pointer(addr))
+		println("     +", i*4, ":", instr)
+	}
+
+	// 2. Check all interrupt conditions
+	println("\n2. INTERRUPT CONDITIONS:")
+	ps := readPS()
+	intlevel := ps & 0xF
+	excm := (ps >> 4) & 0x1
+	intenable := device.AsmFull("rsr.intenable {}", nil)
+	interrupt := readINTERRUPT()
+
+	println("   PS        =", ps)
+	println("   INTLEVEL  =", intlevel, "(must be 0 for level-1)")
+	println("   EXCM      =", excm, "(must be 0)")
+	println("   INTENABLE =", uint32(intenable))
+	println("   INTERRUPT =", interrupt)
+
+	// Check if interrupt 23 is enabled and pending
+	bit23Enabled := (uint32(intenable) & (1 << 23)) != 0
+	bit23Pending := (interrupt & (1 << 23)) != 0
+	println("   Bit 23 enabled?", bit23Enabled)
+	println("   Bit 23 pending?", bit23Pending)
+
+	// 3. Manual interrupt with ALL conditions met
+	println("\n3. FORCING INTERRUPT WITH PERFECT CONDITIONS:")
+
+	// Clear INTLEVEL and EXCM
+	psClean := ps & ^uint32(0x1F) // Clear INTLEVEL and EXCM
+	writePS(psClean)
+	device.AsmFull("rsync", nil)
+
+	// Ensure bit 23 is enabled
+	device.AsmFull("wsr.intenable {v}", map[string]interface{}{"v": uintptr(1 << 23)})
+	device.AsmFull("rsync", nil)
+
+	// Set interrupt
+	device.AsmFull("wsr.intset {v}", map[string]interface{}{"v": uintptr(1 << 23)})
+	device.AsmFull("rsync", nil)
+
+	// Verify
+	psAfter := readPS()
+	intEnAfter := device.AsmFull("rsr.intenable {}", nil)
+	intRegAfter := readINTERRUPT()
+
+	println("   After forcing:")
+	println("     PS.INTLEVEL =", (psAfter & 0xF))
+	println("     PS.EXCM     =", ((psAfter >> 4) & 0x1))
+	println("     INTENABLE   =", uint32(intEnAfter))
+	println("     INTERRUPT   =", intRegAfter)
+
+	counterBefore := esp.VectorEntryCount
+
+	// Try NOP to give CPU a chance
+	println("   Executing 100 NOPs...")
+	for i := 0; i < 100; i++ {
+		device.Asm("nop")
+	}
+
+	counterAfter := esp.VectorEntryCount
+	println("   VectorEntryCount: before=", counterBefore, " after=", counterAfter)
+
+	if counterAfter > counterBefore {
+		println("   SUCCESS!")
+	} else {
+		println("   FAILED - interrupt STILL doesn't fire!")
+		println("   This suggests:")
+		println("     - VECBASE might not be used by CPU")
+		println("     - ROM code intercepts interrupts?")
+		println("     - Hardware configuration issue?")
+	}
+}
+
+// testGPIOHardwareInterrupt - Test 4: Try real hardware interrupt from GPIO
+func testGPIOHardwareInterrupt() {
+	println("\n=== Test 4: GPIO Hardware Interrupt ===")
+	println("  Configuring GPIO 4 (button) for interrupt...")
+
+	// GPIO 4 already configured for input with pullup in initGPIO()
+	// Configure GPIO interrupt: enable, rising edge
+	const GPIO_PIN_INT_ENA_REG = 0x60004074
+	const GPIO_STATUS_W1TC_REG = 0x60004028
+	const GPIO_STATUS_REG = 0x60004020
+
+	// Clear any pending interrupts on GPIO 4
+	volatile.StoreUint32((*uint32)(unsafe.Pointer(uintptr(GPIO_STATUS_W1TC_REG))), 1<<4)
+
+	// Enable rising edge interrupt on GPIO 4 (INT_TYPE = 1)
+	volatile.StoreUint32((*uint32)(unsafe.Pointer(uintptr(GPIO_PIN_INT_ENA_REG+4*4))), 0x01)
+
+	println("  Press button on GPIO 4 or short to GND and release...")
+	println("  Monitoring for 1 second...")
+
+	counterBefore := esp.VectorEntryCount
+
+	// Check status with busy-wait (no time.Sleep in runtime)
+	for i := 0; i < 10; i++ {
+		// Busy wait ~100ms (240 MHz CPU, ~24M cycles = 100ms)
+		for j := 0; j < 24000000; j++ {
+			device.Asm("nop")
+		}
+
+		status := volatile.LoadUint32((*uint32)(unsafe.Pointer(uintptr(GPIO_STATUS_REG))))
+		if status&(1<<4) != 0 {
+			println("  GPIO 4 interrupt detected! GPIO_STATUS=", status)
+			break
+		}
+
+		// Check if vector was called
+		if esp.VectorEntryCount > counterBefore {
+			println("  Vector called during GPIO monitoring!")
+			break
+		}
+	}
+
+	counterAfter := esp.VectorEntryCount
+	isrCount := esp.IsrCount
+	println("  Results:")
+	println("    VectorEntryCount: before=", counterBefore, " after=", counterAfter)
+	println("    IsrCount=", isrCount)
+
+	if counterAfter > counterBefore {
+		println("  SUCCESS: GPIO interrupt triggered vector!")
+	} else {
+		println("  INFO: No GPIO interrupt detected (user may not have pressed button)")
+	}
+}
+
+// prepareInterruptMonitoring - Prepare SYSTIMER for safe interrupt monitoring
+// Rearms target to be far in future to avoid interrupts during println
+func prepareInterruptMonitoring() {
+	// CRITICAL: Before enabling interrupts, rearm TARGET to be FAR in future
+	// This ensures we don't get immediate interrupt during println
+	esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
+	for esp.SYSTIMER.GetUNIT1_OP_TIMER_UNIT1_VALUE_VALID() == 0 {
+	}
+	nowSafe := esp.SYSTIMER.UNIT1_VALUE_LO.Get()
+	targetSafe := nowSafe + 800000 // +10ms in future
+	esp.SYSTIMER.SetTARGET0_LO(targetSafe)
+	esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1)
+	esp.SYSTIMER.INT_CLR.Set(1 << 0) // Clear any pending
+}
+
+// monitorBackgroundInterrupts - Monitor background SYSTIMER interrupts for a period
+// Returns the final interrupt count after monitoring
+func monitorBackgroundInterrupts() uint32 {
+	println(">>> IRQs enabled! Monitoring for 200 cycles (~20-30ms)...")
+
+	// Monitor ISR count SILENTLY (collect data, print AFTER)
+	var samples [11]uint32 // Snapshots at cycles 0, 20, 40, ..., 200
+	sampleIdx := 0
+
+	for i := 0; i < 200; i++ {
+		// Busy-wait (~100us per cycle on 240MHz)
+		for j := 0; j < 100000; j++ {
+		}
+
+		// Collect samples every 20 cycles
+		if i%20 == 0 || i == 199 {
+			if sampleIdx < 11 {
+				samples[sampleIdx] = esp.IsrCount
+				sampleIdx++
+			}
+		}
+	}
+
+	// Print results
+	println(">>> Monitoring complete! Results:")
+	for i := 0; i < sampleIdx; i++ {
+		cycle := i * 20
+		if i == sampleIdx-1 && cycle != 199 {
+			cycle = 199
+		}
+		println("  Cycle", cycle, ": IsrCount=", samples[i])
+	}
+
+	finalCount := esp.IsrCount
+	println(">>> Final IsrCount=", finalCount)
+
+	return finalCount
+}
+
+// validateVectorTableLayout - Validate vector table placement (ESP-IDF compliance check)
+func validateVectorTableLayout() {
+	vecbase := device.AsmFull("rsr.vecbase {}", nil)
+	vectorBaseAddr := uintptr(unsafe.Pointer(&vectorBase))
+	vectorsEndAddr := uintptr(unsafe.Pointer(&vectorsEnd))
+	textStartAddr := uintptr(unsafe.Pointer(&textStart))
+
+	println("\n=== VECTOR TABLE VALIDATION (ESP-IDF compliance) ===")
+	println("VECBASE       =", uint32(uintptr(vecbase)), "(expected 0x40374000)")
+	println("_vector_base  =", uint32(vectorBaseAddr))
+	println("_vectors_end  =", uint32(vectorsEndAddr))
+	println("_text_start   =", uint32(textStartAddr))
+
+	vectorsSize := uint32(vectorsEndAddr - vectorBaseAddr)
+	gap := uint32(textStartAddr - vectorsEndAddr)
+
+	println("Vectors size  =", vectorsSize, "bytes (expected 384)")
+	println("Gap to .text  =", gap, "bytes")
+
+	// Проверки
+	allOk := true
+
+	if uint32(uintptr(vecbase)) != uint32(vectorBaseAddr) {
+		println("✗ ERROR: VECBASE != _vector_base")
+		allOk = false
+	} else {
+		println("✓ VECBASE matches _vector_base")
+	}
+
+	if vectorsSize > 0x400 {
+		println("✗ ERROR: Vectors section exceeds 1KB!")
+		allOk = false
+	} else if vectorsSize != 0x180 {
+		println("⚠ WARNING: Vectors size != 384 bytes (expected)")
+	} else {
+		println("✓ Vectors size correct (384 bytes)")
+	}
+
+	if vectorsEndAddr > textStartAddr {
+		println("✗ FATAL: Vectors overlap .text!")
+		allOk = false
+	} else {
+		println("✓ No overlap between .vectors and .text")
+	}
+
+	if gap != 0 {
+		println("⚠ INFO: Gap of", gap, "bytes between .vectors and .text")
+	} else {
+		println("✓ .text starts immediately after .vectors")
+	}
+
+	if allOk {
+		println("✓ Vector table layout OK (ESP-IDF compliant)")
+	} else {
+		println("✗ Vector table layout has ERRORS!")
+	}
+
+	println("=============================================")
+}
+
+// dumpDiagnosticInfo - Dump detailed diagnostic information about vector table and interrupt state
+func dumpDiagnosticInfo() {
+	println("\n=== DIAGNOSTIC DUMP ===")
+
+	// Validate layout first
+	validateVectorTableLayout()
+
+	// Dump vector table addresses and contents
+	dumpVectorTableLayout()
+
+	// Check SYSTIMER state
+	esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
+	for esp.SYSTIMER.GetUNIT1_OP_TIMER_UNIT1_VALUE_VALID() == 0 {
+	}
+	now := esp.SYSTIMER.UNIT1_VALUE_LO.Get()
+	target := esp.SYSTIMER.TARGET0_LO.Get()
+	intSt := esp.SYSTIMER.INT_ST.Get()
+	intEna := esp.SYSTIMER.INT_ENA.Get()
+	conf := esp.SYSTIMER.CONF.Get()
+	t0conf := esp.SYSTIMER.TARGET0_CONF.Get()
+
+	println("\nSYSTIMER:")
+	println("  NOW=", now, " TARGET=", target)
+	println("  INT_ST=", intSt, " INT_ENA=", intEna)
+	println("  CONF=", conf, " T0CONF=", t0conf)
+	println("  Counter crossed target?", now >= target)
+
+	// Check Interrupt Matrix
+	mapVal := esp.INTERRUPT_CORE0.GetSYSTIMER_TARGET0_INT_MAP()
+	println("\nInterrupt Matrix: SYSTIMER_TARGET0 -> CPU_INT", mapVal)
+
+	// Check CPU interrupt enable
+	intEnableReg := device.AsmFull("rsr.intenable {}", nil)
+	println("CPU INTENABLE=", uint32(intEnableReg))
+	println("  Bit", mapVal, "enabled?", (uint32(intEnableReg)&(1<<mapVal)) != 0)
+
+	println("\n=== END DIAGNOSTIC DUMP ===")
+}
+
 // External symbols from linker script and ASM (esp32s3.ld, xtensa_vectors_esp32s3.S)
 //
 //go:extern _vector_base
 var vectorBase [0]byte
+
+//go:extern _vectors_end
+var vectorsEnd [0]byte
+
+//go:extern _text_start
+var textStart [0]byte
 
 //go:extern _UserExceptionVector
 var userExceptionVector [0]byte
@@ -97,6 +550,9 @@ func main() {
 	println(">>> VECBASE was set in call_start_cpu0 to _vector_base (0x40374000)")
 	println(">>> Our vector table is ready for interrupts!")
 
+	// Validate vector table layout (ESP-IDF compliance)
+	validateVectorTableLayout()
+
 	// DEBUG: Signal VECBASE setup complete via GPIO6
 	debugGPIO(6)
 
@@ -113,128 +569,29 @@ func main() {
 	// Configure GPIO41 as debug output (toggled by SYSTIMER ISR)
 	initDebugPin41()
 
-	// CRITICAL: Before enabling interrupts, rearm TARGET to be FAR in future
-	// This ensures we don't get immediate interrupt during println
-	esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
-	for esp.SYSTIMER.GetUNIT1_OP_TIMER_UNIT1_VALUE_VALID() == 0 {
-	}
-	nowSafe := esp.SYSTIMER.UNIT1_VALUE_LO.Get()
-	targetSafe := nowSafe + 800000 // +10ms in future
-	esp.SYSTIMER.SetTARGET0_LO(targetSafe)
-	esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1)
-	esp.SYSTIMER.INT_CLR.Set(1 << 0) // Clear any pending
-
-	// CRITICAL: Enable interrupts!
-	setPSIntLevel(0)
-	println(">>> IRQs enabled! Monitoring for 200 cycles (~20-30ms)...")
-
-	// Monitor ISR count SILENTLY (collect data, print AFTER)
-	var samples [11]uint32 // Snapshots at cycles 0, 20, 40, ..., 200
-	sampleIdx := 0
-
-	for i := 0; i < 200; i++ {
-		// Busy-wait (~100us per cycle on 240MHz)
-		for j := 0; j < 100000; j++ {
-		}
-
-		// Collect samples every 20 cycles
-		if i%20 == 0 || i == 199 {
-			if sampleIdx < 11 {
-				samples[sampleIdx] = esp.IsrCount
-				sampleIdx++
-			}
-		}
-	}
+	// Prepare SYSTIMER and enable interrupts
+	prepareInterruptMonitoring()
+	setPSIntLevel(0) // Enable interrupts!
 
 	// CRITICAL: Disable interrupts before printing results!
 	// println is NOT reentrant and crashes if interrupted
 	old := interrupt.Disable()
 
-	println(">>> Monitoring complete! Results:")
-	for i := 0; i < sampleIdx; i++ {
-		cycle := i * 20
-		if i == sampleIdx-1 && cycle != 199 {
-			cycle = 199
-		}
-		println("  Cycle", cycle, ": IsrCount=", samples[i])
-	}
-	finalCount := esp.IsrCount
-	println(">>> Final IsrCount=", finalCount)
+	// Monitor background SYSTIMER interrupts
+	finalCount := monitorBackgroundInterrupts()
 
 	if finalCount == 0 {
 		println("FATAL: No ISR fired!")
 
-		// Test 1: Call handleInterrupt directly from Go (bypasses ALL ASM)
-		println("\nTest 1: Direct call to handleInterrupt()...")
-		oldCount := esp.IsrCount
-		esp.HandleInterruptDirect() // Will add this function
-		newCount := esp.IsrCount
-		println("  Before:", oldCount, " After:", newCount)
-		if newCount > oldCount {
-			println("  SUCCESS! handleInterrupt works!")
-		} else {
-			println("  FAILED! handleInterrupt doesn't increment counter!")
-		}
+		// Run all diagnostic tests in order
+		//testDirectCallToHandleInterrupt()
+		//testSoftwareInterrupt()
+		//testPSRegisterAndWAITI()
+		testDeepDiagnostics()
+		testGPIOHardwareInterrupt()
 
-		// Test 2: Software interrupt (tests vector table)
-		println("\nTest 2: Software interrupt on CPU_INT 23...")
-		device.AsmFull("wsr.intset {v}", map[string]interface{}{"v": uintptr(1 << 23)})
-		device.AsmFull("rsync", nil)
-		vectorEntry := esp.VectorEntryCount
-		swCount := esp.IsrCount
-		beforeGo := esp.IsrCountBeforeGo
-		afterGo := esp.IsrCountAfterGo
-		println("  After SW interrupt:")
-		println("    VectorEntryCount=", vectorEntry, " (did CPU jump to vector?)")
-		println("    IsrCount=", swCount, " (from Go handleInterrupt)")
-		println("    IsrCountBeforeGo=", beforeGo, " IsrCountAfterGo=", afterGo)
-
-		// Detailed diagnostics
-		if vectorEntry == 0 {
-			println("  FATAL: CPU never jumped to _UserExceptionVector!")
-			println("  Check: VECBASE, vector table placement, interrupt routing")
-		} else if beforeGo == 0 {
-			println("  PROBLEM: Vector entered but crashed before handleInterrupt!")
-			println("  Check: PS register setup, EXCM bit, ASM flow")
-		} else if afterGo == 0 {
-			println("  PROBLEM: handleInterrupt was called but never returned!")
-			println("  Check: handleInterrupt crashes, stack overflow")
-		} else if swCount > newCount {
-			println("  SUCCESS! Vector table works!")
-		} else {
-			println("  FAILED! Vector table doesn't call handleInterrupt!")
-		}
-
-		println("\nDiagnostic dump:")
-
-		// Dump vector table addresses and contents
-		dumpVectorTableLayout()
-
-		// Check SYSTIMER state
-		esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
-		for esp.SYSTIMER.GetUNIT1_OP_TIMER_UNIT1_VALUE_VALID() == 0 {
-		}
-		now := esp.SYSTIMER.UNIT1_VALUE_LO.Get()
-		target := esp.SYSTIMER.TARGET0_LO.Get()
-		intSt := esp.SYSTIMER.INT_ST.Get()
-		intEna := esp.SYSTIMER.INT_ENA.Get()
-		conf := esp.SYSTIMER.CONF.Get()
-		t0conf := esp.SYSTIMER.TARGET0_CONF.Get()
-
-		println("SYSTIMER:")
-		println("  NOW=", now, " TARGET=", target)
-		println("  INT_ST=", intSt, " INT_ENA=", intEna)
-		println("  CONF=", conf, " T0CONF=", t0conf)
-		println("  Counter crossed target?", now >= target)
-
-		// Check Interrupt Matrix
-		mapVal := esp.INTERRUPT_CORE0.GetSYSTIMER_TARGET0_INT_MAP()
-		println("Interrupt Matrix: SYSTIMER_TARGET0 -> CPU_INT", mapVal)
-
-		// Check CPU interrupt enable
-		intEnableReg := device.AsmFull("rsr.intenable {}", nil)
-		println("CPU INTENABLE=", uint32(intEnableReg))
-		println("  Bit 23 enabled?", (uint32(intEnableReg)&(1<<23)) != 0)
+		// Dump all diagnostic information
+		dumpDiagnosticInfo()
 
 		println("\nHalting...")
 		for {
