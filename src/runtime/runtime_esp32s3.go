@@ -591,6 +591,9 @@ func main() {
 	initGPIOPeripherals()
 	initSPIPeripherals()
 
+	// Initialize USB Serial/JTAG peripheral (enable clocks)
+	//initUSBSerial()
+
 	// Initialize UART after USB configuration
 	machine.USBCDC.Configure(machine.UARTConfig{BaudRate: 115200})
 	machine.InitSerial()
@@ -603,9 +606,6 @@ func main() {
 		print(".")
 	}
 	print("\n")
-	println("SUCCESS! System is stable, entering test loop...")
-
-	abort()
 
 	//dumpCacheState("After basic init")
 
@@ -761,6 +761,19 @@ func initGPIOPeripherals() {
 	// Also enable GPIO sigma delta clock if needed
 	esp.GPIO_SD.SetSIGMADELTA_CG_CLK_EN(1)
 	esp.GPIO_SD.SetSIGMADELTA_MISC_FUNCTION_CLK_EN(1)
+}
+
+// initUSBSerial initializes USB Serial/JTAG peripheral
+// Based on ESP-IDF USB Serial/JTAG driver initialization
+func initUSBSerial() {
+	// Enable USB Serial/JTAG peripheral clock
+	// Reference: ESP-IDF components/hal/esp32s3/include/hal/usb_serial_jtag_ll.h
+	// Function: usb_serial_jtag_ll_enable_bus_clock()
+	esp.SYSTEM.SetPERIP_CLK_EN1_USB_DEVICE_CLK_EN(1)
+
+	// Release USB Serial/JTAG from reset
+	esp.SYSTEM.SetPERIP_RST_EN1_USB_DEVICE_RST(1) // Assert reset
+	esp.SYSTEM.SetPERIP_RST_EN1_USB_DEVICE_RST(0) // Release reset
 }
 
 // initSPIPeripherals initializes SPI2 and SPI3 peripherals exactly like ESP-IDF

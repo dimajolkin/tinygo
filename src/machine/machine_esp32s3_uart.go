@@ -84,28 +84,18 @@ func (usbdev USB_DEVICE) Configure(config UARTConfig) error {
 }
 
 func (usbdev USB_DEVICE) WriteByte(c byte) error {
-	// Check if USB host is connected by looking at configuration status
-	// If no host is connected, just drop the byte silently
-	if !usbdev.isHostConnected() {
-		return nil
+	// Implementation based on ESP32-C3 (same USB Serial/JTAG hardware)
+	// Wait for TX FIFO space - blocking write
+	for usbdev.Bus.GetEP1_CONF_SERIAL_IN_EP_DATA_FREE() == 0 {
+		// Wait for buffer space
+		// This blocks if host not connected, which is expected behavior
 	}
 
-	// Host is connected - wait for TX FIFO space with reasonable timeout
-	timeout := 10000 // Generous timeout for connected host
-	for usbdev.Bus.GetEP1_CONF_SERIAL_IN_EP_DATA_FREE() == 0 && timeout > 0 {
-		timeout--
-	}
-
-	// Even with host connected, don't hang forever
-	if timeout == 0 {
-		return nil
-	}
-
-	// Write byte to USB Serial/JTAG endpoint
+	// Write byte to USB Serial/JTAG FIFO
 	usbdev.Bus.SetEP1_RDWR_BYTE(uint32(c))
 
-	// Trigger transmission
-	usbdev.Bus.SetEP1_CONF_WR_DONE(1)
+	// Trigger transmission (hardware auto-clears WR_DONE when complete)
+	usbdev.flush()
 
 	return nil
 }
