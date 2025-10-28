@@ -534,6 +534,11 @@ func main() {
 
 	clearbss()
 
+	// Initialize memory subsystems (MMU, cache buses, autoload)
+	// This complements the basic cache init done in esp32s3.S
+	// Reference: ESP-IDF bootloader_esp32s3.c and cache_hal_init()
+	esp.InitMemorySubsystems()
+
 	// Initialize GPIO and SPI peripherals early (GPIO matrix might be already initialized by ROM)
 	initGPIOPeripherals()
 	initSPIPeripherals()
@@ -550,6 +555,9 @@ func main() {
 	println(">>> VECBASE was set in call_start_cpu0 to _vector_base (0x40374000)")
 	println(">>> Our vector table is ready for interrupts!")
 
+	// Validate memory subsystems initialization
+	esp.ValidateMemoryInit()
+	
 	// Validate vector table layout (ESP-IDF compliance)
 	validateVectorTableLayout()
 

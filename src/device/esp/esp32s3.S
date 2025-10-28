@@ -124,6 +124,10 @@ call_start_cpu0:
     or a3, a3, a4
     s32i a3, a2, 0
     
+    // NOTE: Additional memory initialization (MMU, cache bus, autoload)
+    // is done in Go code (initMemorySubsystems) after basic cache is ready.
+    // This allows better error handling and logging.
+    
     // Now safe to access Flash - check if vectors already in place
     l32r a0, 2b              // _vector_base address
     l32i a1, a0, 0           // First word at _vector_base
