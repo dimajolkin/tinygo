@@ -603,12 +603,9 @@ func main() {
 		print(".")
 	}
 	print("\n")
-
 	println("SUCCESS! System is stable, entering test loop...")
-	esp.ValidateMemoryInit()
 
-	for {
-	}
+	abort()
 
 	//dumpCacheState("After basic init")
 
