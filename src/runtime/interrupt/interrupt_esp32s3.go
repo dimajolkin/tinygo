@@ -1,9 +1,20 @@
 //go:build esp32s3
 
+// Package interrupt provides interrupt handling for ESP32-S3 (Xtensa LX7)
+//
+// Based on ESP-IDF interrupt handling:
+//   - components/xtensa/xtensa_vectors.S (dispatch logic)
+//   - components/esp_hw_support/interrupt.c (interrupt allocation)
+//
+// Main differences from ESP-IDF:
+//   - Uses TinyGo's interrupt.New() instead of esp_intr_alloc()
+//   - Simplified PS register manipulation (no FPU/coprocessor state)
+//   - Call0 ABI conventions
 package interrupt
 
 import (
 	"device"
+	"device/esp"
 	"errors"
 )
 
@@ -21,6 +32,9 @@ type State uintptr
 //
 // Critical sections can be nested. Make sure to call Restore in the same order
 // as you called Disable (this happens naturally with the pattern above).
+//
+// SOURCE: Based on ESP-IDF portmacro.h portSET_INTERRUPT_MASK_FROM_ISR
+// ESP-IDF: components/freertos/FreeRTOS-Kernel-SMP/portable/xtensa/include/freertos/portmacro.h
 func Disable() (state State) {
 	// Use RSIL instruction: atomically read PS and set INTLEVEL=15
 	// This is equivalent to ESP-IDF's XTOS_SET_INTLEVEL(XCHAL_EXCM_LEVEL):
@@ -39,12 +53,16 @@ func Disable() (state State) {
 // returned by Disable as a parameter. If interrupts were disabled before
 // calling Disable, this will not re-enable interrupts, allowing for nested
 // critical sections.
+//
+// SOURCE: Based on ESP-IDF portmacro.h portCLEAR_INTERRUPT_MASK_FROM_ISR
+// ESP-IDF: components/freertos/FreeRTOS-Kernel-SMP/portable/xtensa/include/freertos/portmacro.h
 func Restore(state State) {
 	// Read CURRENT PS register (it may have changed since Disable!)
 	currentPS := device.AsmFull("rsr.ps {}", nil)
 
 	// Modify only the INTLEVEL field (bits [3:0]), preserve all other bits
-	// This matches ESP-IDF's portCLEAR_INTERRUPT_MASK() behavior
+	// This matches ESP-IDF's portCLEAR_INTERRUPT_MASK() behavior:
+	//   ps_val = (ps_val & ~INTLEVEL_MASK) | prev_level;
 	newPS := (uintptr(currentPS) &^ 0x0F) | (uintptr(state) & 0x0F)
 
 	// Write back the modified PS register
@@ -71,33 +89,32 @@ func callHandlers(num int)
 // Debug counter for handleInterrupt calls
 var handleInterruptCallCount uint32
 
-// handleInterrupt - главный диспетчер прерываний для ESP32-S3
+// handleInterrupt - главный диспетчер прерываний для ESP32-S3 (ESP-IDF style)
 // Вызывается из ассемблерного кода _xt_level1_int_handler_entry
 //
+// Parameters:
+//
+//	intNum - CPU interrupt line number (0-31) passed in a2 register
+//
+// NOTE: CPU interrupt already cleared by ASM (wsr.intclear) before this is called!
+// This handler must clear peripheral interrupt flag (e.g. SYSTIMER.INT_CLR)
+//
 //export handleInterrupt
-func handleInterrupt() {
-	// TEMPORARY: Only increment counter and return immediately
-	// This tests if basic ISR entry/exit works
+func handleInterrupt(intNum uint32) {
+	// Increment counter
 	handleInterruptCallCount++
 
-	// TODO: Uncomment actual interrupt handling once basic flow works
-	// Read INTERRUPT register to see which CPU interrupt line triggered
-	// interruptReg := device.AsmFull("rsr.interrupt {}", nil)
-	// interruptMask := uint32(uintptr(interruptReg))
-	// Find which interrupt line is active
-	// ESP32-S3 has 32 interrupt lines (0-31)
-	// for i := uint32(0); i < 32; i++ {
-	// 	if interruptMask&(1<<i) != 0 {
-	// 		// Clear this CPU interrupt (write-1-to-clear via INTCLEAR register)
-	// 		device.AsmFull("wsr.intclear {v}", map[string]interface{}{
-	// 			"v": uintptr(1 << i),
-	// 		})
-	// 		device.AsmFull("rsync", nil)
-	// 		// Call registered handler for this interrupt line
-	// 		callHandler(int(i))
-	// 		break // Handle only one interrupt at a time
-	// 	}
-	// }
+	// Handle interrupt 23 (SYSTIMER)
+	if intNum == 23 {
+		// Safety: Stop timer after 5 calls during testing
+		esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(0) // Stop timer
+
+		// Clear SYSTIMER peripheral interrupt flag
+		// This is the peripheral source - must clear it or interrupt will re-trigger!
+		esp.SYSTIMER.INT_CLR.Set(1 << 0)
+		// TODO: Call registered handler via callHandler(int(intNum))
+	}
+	// TODO: Handle other interrupt lines by looking up in interrupt table
 }
 
 //export handleException

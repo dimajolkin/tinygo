@@ -563,24 +563,38 @@ func initSystimerTick() {
 	}
 	println("SYST: Busy wait completed!")
 
-	// Re-enable interrupts
-	println("SYST: Re-enabling IRQs...")
+	// Step 1: Test ISR with counter (timer still stopped)
+	println("SYST: Re-enabling IRQs (timer stopped)...")
 	interrupt.SetPSIntLevel(0)
-	println("SYST: IRQs re-enabled (timer still stopped)")
 
-	// Now wait for interrupt
-	println("SYST: Waiting with IRQs enabled...")
-	for i := 0; i < 1000000; i++ {
+	// Read ASM counter
+	//go:extern _isr_call_count
+	var isrCallCount [1]uint32
+	println("SYST: ASM ISR counter before:", isrCallCount[0])
+
+	// Step 2: Start timer briefly, count interrupts
+	println("SYST: Starting timer for a short time...")
+	esp.SYSTIMER.INT_CLR.Set(1 << 0)
+	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(1)
+
+	// Wait a tiny bit (let a few interrupts fire)
+	for i := 0; i < 100; i++ {
 		device.Asm("nop")
-		if systimerIRQCount > startCount {
-			println("SYST: Got interrupt in loop!")
-			break
-		}
 	}
 
-	// Check if interrupt fired
+	// Stop timer immediately
+	interrupt.SetPSIntLevel(15)
+	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(0)
+	esp.SYSTIMER.INT_CLR.Set(1 << 0)
+	interrupt.SetPSIntLevel(0)
+
+	println("SYST: Timer stopped!")
+	println("SYST: ASM ISR counter after:", isrCallCount[0])
+
+	// Check results
 	endHandlerCount := interrupt.GetHandleInterruptCallCount()
-	println("SYST: After wait, count=", systimerIRQCount)
+	println("SYST: Results:")
+	println("  ASM ISR calls:", isrCallCount[0])
 	println("  handleInterrupt calls:", endHandlerCount-startHandlerCount)
 	println("  systimerHandleInterrupt calls:", systimerIRQCount-startCount)
 
