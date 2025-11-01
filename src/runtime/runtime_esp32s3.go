@@ -64,14 +64,6 @@ func getUserExceptionVector() uintptr {
 	return uintptr(unsafe.Pointer(&userExceptionVectorSymbol))
 }
 
-// Compatibility aliases for test code
-var (
-	vectorBase          = getVectorBase
-	vectorsEnd          = getVectorsEnd
-	textStart           = getTextStart
-	userExceptionVector = getUserExceptionVector
-)
-
 // Debug functions sorted by GPIO number (ascending: 4→5→6→7)
 func debugGPIO(n int) {
 	*(*uint32)(unsafe.Pointer(uintptr(0x60004024))) |= (1 << n) // GPIO_ENABLE_REG: enable GPIO4 output
@@ -432,22 +424,6 @@ var _sbss [0]byte
 //go:extern _ebss
 var _ebss [0]byte
 
-// setPSIntLevel sets PS.INTLEVEL to the given level (0..15)
-// WARNING: Setting level=0 enables ALL interrupts! Must be called when ready.
-func setPSIntLevel(level int) {
-	// Read current PS
-	oldPs := device.AsmFull("rsr.ps {}", nil)
-
-	// Modify PS.INTLEVEL field (bits [3:0])
-	ps := oldPs
-	ps &^= 0x0F                 // Clear INTLEVEL bits
-	ps |= uintptr(level & 0x0F) // Set new INTLEVEL
-
-	// Write new PS and sync
-	device.AsmFull("wsr.ps {v}", map[string]interface{}{"v": ps})
-	device.AsmFull("rsync", nil)
-}
-
 // initSystimerTick configures SYSTIMER TARGET0 to generate periodic interrupts every 10ms
 // and routes it to a CPU interrupt channel via the Interrupt Matrix.
 func initSystimerTick() {
@@ -463,6 +439,12 @@ func initSystimerTick() {
 
 	// Temporarily block interrupts during configuration
 	old := interrupt.Disable()
+	println("SYST: After Disable(), old INTLEVEL=", uint32(old))
+
+	// Verify interrupts are actually disabled
+	psAfterDisable := device.AsmFull("rsr.ps {}", nil)
+	intlevelNow := uint32(uintptr(psAfterDisable)) & 0x0F
+	println("SYST: Current INTLEVEL (should be 15):", intlevelNow)
 
 	// Map SYSTIMER TARGET0 to selected CPU interrupt channel on core0
 	esp.INTERRUPT_CORE0.SetSYSTIMER_TARGET0_INT_MAP(cpuInterruptForSystimer)
@@ -504,65 +486,49 @@ func initSystimerTick() {
 	esp.SYSTIMER.INT_ENA.SetBits(1 << 0)
 	println("SYST: Peripheral INT enabled")
 
-	// Arm periodic alarm
-	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(1)
-	println("SYST: WORK_EN set")
+	// Clear any pending peripheral interrupt BEFORE arming
+	esp.SYSTIMER.INT_CLR.Set(1 << 0)
+	println("SYST: Cleared pending INT")
 
-	// Mask CPU interrupts temporarily
-	device.AsmFull("wsr.intenable {v}", map[string]interface{}{"v": uintptr(0)})
-	device.AsmFull("rsync", nil)
-	interrupt.Restore(old)
-	println("SYST: Restored old state")
-
-	// Enable CPU interrupt line for SYSTIMER with INTLEVEL=15 temporarily
-	psTmp := device.AsmFull("rsr.ps {}", nil)
-	psTmp &^= 0x0F
-	psTmp |= 15
-	device.AsmFull("wsr.ps {v}", map[string]interface{}{"v": psTmp})
-	device.AsmFull("rsync", nil)
-	println("SYST: INTLEVEL=15")
-
-	// Clear peripheral pending if any
-	if (esp.SYSTIMER.INT_ST.Get() & 1) != 0 {
-		esp.SYSTIMER.INT_CLR.Set(1 << 0)
-		println("SYST: Cleared pending INT_ST")
-	}
-
-	// Set INTENABLE bit for selected CPU interrupt line
+	// Enable CPU interrupt line for SYSTIMER through INTENABLE (while interrupts disabled)
 	ien := device.AsmFull("rsr.intenable {}", nil)
 	ien |= (1 << cpuInterruptForSystimer)
 	device.AsmFull("wsr.intenable {v}", map[string]interface{}{"v": ien})
 	device.AsmFull("rsync", nil)
 	println("SYST: INTENABLE bit 23 set")
 
-	// Rearm comparator relative to current time
-	esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
-	for esp.SYSTIMER.GetUNIT1_OP_TIMER_UNIT1_VALUE_VALID() == 0 {
-	}
-	rNowLo := esp.SYSTIMER.UNIT1_VALUE_LO.Get()
-	rNowHi := esp.SYSTIMER.UNIT1_VALUE_HI.Get()
-	rTgtLo := rNowLo + periodTicks
-	rTgtHi := rNowHi
-	if rTgtLo < rNowLo {
-		rTgtHi++
-	}
-	esp.SYSTIMER.SetTARGET0_HI_TIMER_TARGET0_HI(rTgtHi & 0xFFFFF)
-	esp.SYSTIMER.SetTARGET0_LO(rTgtLo)
-	esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1)
-	println("SYST: Rearmed comparator")
+	// Arm periodic alarm (this starts the timer)
+	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(1)
+	println("SYST: WORK_EN set, timer armed")
 
-	// Drop to INTLEVEL=0 (enable interrupts)
-	println("SYST: About to enable interrupts (INTLEVEL=0)...")
-	setPSIntLevel(0)
-	println("SYST: Interrupts enabled!")
+	// Verify interrupts are still disabled before Restore
+	psBeforeRestore := device.AsmFull("rsr.ps {}", nil)
+	intlevelBefore := uint32(uintptr(psBeforeRestore)) & 0x0F
+	println("SYST: Before Restore(), INTLEVEL=", intlevelBefore, "(should be 15)")
+	println("SYST: Will restore to INTLEVEL=", uint32(old))
+
+	// About to restore interrupts
+	println("SYST: About to call interrupt.Restore()...")
+
+	// Restore interrupts (PS register) - NOW interrupts can fire
+	interrupt.Restore(old)
+
+	println("SYST: Returned from interrupt.Restore()!")
+
+	// Verify interrupts are restored
+	psAfterRestore := device.AsmFull("rsr.ps {}", nil)
+	intlevelAfter := uint32(uintptr(psAfterRestore)) & 0x0F
+	println("SYST: After Restore(), INTLEVEL=", intlevelAfter, "(should be", uint32(old), ")")
+	println("SYST: Interrupts now ACTIVE!")
 
 	// Wait 10ms for at least one interrupt to fire
 	println("SYST: Waiting for first interrupt...")
 	startCount := systimerIRQCount
+	startHandlerCount := interrupt.GetHandleInterruptCallCount()
 
 	// TEST: Temporarily disable interrupts to see if loop completes
 	println("SYST: Test - disabling IRQs temporarily...")
-	setPSIntLevel(15)
+	interrupt.SetPSIntLevel(15)
 
 	// Simple busy wait
 	println("SYST: Starting busy wait...")
@@ -572,8 +538,8 @@ func initSystimerTick() {
 	println("SYST: Busy wait completed!")
 
 	// Re-enable interrupts
-	println("SYST: Re-enabling IRQs...")
-	setPSIntLevel(0)
+	//println("SYST: Re-enabling IRQs...")
+	interrupt.SetPSIntLevel(0)
 
 	// Now wait for interrupt
 	println("SYST: Waiting with IRQs enabled...")
@@ -586,7 +552,11 @@ func initSystimerTick() {
 	}
 
 	// Check if interrupt fired
+	endHandlerCount := interrupt.GetHandleInterruptCallCount()
 	println("SYST: After wait, count=", systimerIRQCount)
+	println("  handleInterrupt calls:", endHandlerCount-startHandlerCount)
+	println("  systimerHandleInterrupt calls:", systimerIRQCount-startCount)
+
 	if systimerIRQCount > startCount {
 		println("✓ SYSTIMER interrupts working! Count:", systimerIRQCount)
 	} else {

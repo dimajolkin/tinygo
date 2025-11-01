@@ -7,7 +7,9 @@ import (
 	"errors"
 )
 
-// State represents the previous global interrupt state (PS register on Xtensa).
+// State represents the previous INTLEVEL value (bits [3:0] of PS register on Xtensa).
+// We store only INTLEVEL, not the entire PS register, to avoid clobbering other PS bits
+// that may have changed between Disable() and Restore() (like CALLINC, WOE, etc.)
 type State uintptr
 
 // Disable disables all interrupts and returns the previous interrupt state. It
@@ -20,17 +22,17 @@ type State uintptr
 // Critical sections can be nested. Make sure to call Restore in the same order
 // as you called Disable (this happens naturally with the pattern above).
 func Disable() (state State) {
-	// Read current PS register
-	ps := device.AsmFull("rsr.ps {}", nil)
-
-	// Set INTLEVEL=15 (mask all interrupts)
-	newPS := (ps &^ 0x0F) | 15
-	device.AsmFull("wsr.ps {v}", map[string]interface{}{
-		"v": newPS,
-	})
-	device.AsmFull("rsync", nil)
-
-	return State(ps)
+	// Use RSIL instruction: atomically read PS and set INTLEVEL=15
+	// This is equivalent to ESP-IDF's XTOS_SET_INTLEVEL(XCHAL_EXCM_LEVEL):
+	//   __asm__ __volatile__("rsil %0, 15\n" : "=a" (__tmp) : : "memory");
+	// RSIL reads old PS into result register and sets PS.INTLEVEL to immediate value
+	ps := device.AsmFull("rsil {}, 15", nil)
+	
+	// Extract and return only the INTLEVEL field (bits [3:0])
+	// This matches ESP-IDF's portSET_INTERRUPT_MASK() behavior:
+	//   prev_level = ((prev_level >> SHIFT) & MASK);
+	intlevel := (uintptr(ps) & 0x0F)
+	return State(intlevel)
 }
 
 // Restore restores interrupts to what they were before. Give the previous state
@@ -38,10 +40,25 @@ func Disable() (state State) {
 // calling Disable, this will not re-enable interrupts, allowing for nested
 // critical sections.
 func Restore(state State) {
+	print("R1 ")  // DEBUG: Entered Restore
+	
+	// Read CURRENT PS register (it may have changed since Disable!)
+	currentPS := device.AsmFull("rsr.ps {}", nil)
+	print("R2 ")  // DEBUG: Read current PS
+	
+	// Modify only the INTLEVEL field (bits [3:0]), preserve all other bits
+	// This matches ESP-IDF's portCLEAR_INTERRUPT_MASK() behavior
+	newPS := (uintptr(currentPS) &^ 0x0F) | (uintptr(state) & 0x0F)
+	print("R3 ")  // DEBUG: Calculated new PS
+	
+	// Write back the modified PS register
 	device.AsmFull("wsr.ps {v}", map[string]interface{}{
-		"v": uintptr(state),
+		"v": newPS,
 	})
+	print("R4 ")  // DEBUG: Wrote PS
+	
 	device.AsmFull("rsync", nil)
+	print("R5\n")  // DEBUG: Done rsync
 }
 
 // In returns whether the system is currently in an interrupt.
@@ -58,11 +75,17 @@ func In() bool {
 //go:linkname callHandlers runtime/interrupt.callHandlers
 func callHandlers(num int)
 
+// Debug counter for handleInterrupt calls
+var handleInterruptCallCount uint32
+
 // handleInterrupt - главный диспетчер прерываний для ESP32-S3
 // Вызывается из ассемблерного кода _xt_level1_int_handler_entry
 //
 //export handleInterrupt
 func handleInterrupt() {
+	// Increment debug counter (ISR-safe)
+	handleInterruptCallCount++
+
 	// Read INTERRUPT register to see which CPU interrupt line triggered
 	interruptReg := device.AsmFull("rsr.interrupt {}", nil)
 	interruptMask := uint32(uintptr(interruptReg))
@@ -76,7 +99,7 @@ func handleInterrupt() {
 				"v": uintptr(1 << i),
 			})
 			device.AsmFull("rsync", nil)
-			
+
 			// Call registered handler for this interrupt line
 			callHandler(int(i))
 			break // Handle only one interrupt at a time
@@ -96,7 +119,7 @@ func handleException(exccause, excvaddr, epc uint32) {
 	print("\nEPC: ")
 	printHex32(epc)
 	print("\n")
-	
+
 	// Halt forever
 	for {
 		device.Asm("waiti 0")
@@ -232,4 +255,26 @@ func (i Interrupt) SetPriority(priority uint8) error {
 	// This is a placeholder - actual implementation would need
 	// to configure interrupt routing through Interrupt Matrix.
 	return nil
+}
+
+// SetPSIntLevel sets PS.INTLEVEL to the given level (0..15)
+// Level 0 = all interrupts enabled
+// Level 15 = all interrupts masked
+// WARNING: This is a low-level function. Prefer using Disable()/Restore()
+func SetPSIntLevel(level int) {
+	// Read current PS
+	oldPs := device.AsmFull("rsr.ps {}", nil)
+	// Modify PS.INTLEVEL field (bits [3:0])
+	ps := oldPs
+	ps &^= 0x0F                 // Clear INTLEVEL bits
+	ps |= uintptr(level & 0x0F) // Set new INTLEVEL
+	// Write new PS and sync
+	device.AsmFull("wsr.ps {v}", map[string]interface{}{"v": ps})
+	device.AsmFull("rsync", nil)
+}
+
+// GetHandleInterruptCallCount returns the number of times handleInterrupt was called.
+// Used for debugging interrupt system.
+func GetHandleInterruptCallCount() uint32 {
+	return handleInterruptCallCount
 }
