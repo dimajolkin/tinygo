@@ -71,6 +71,11 @@ call_start_cpu0:
     // We just need to tell the CPU where they are by setting VECBASE register
     call0 runtime.setVecbaseToVectorBase
 
+    // TEST: Initialize _isr_call_count to 99 to verify Go can read it correctly
+    movi a2, _isr_call_count
+    movi a3, 99
+    s32i a3, a2, 0
+
     // Jump to the runtime start function written in Go.
     call4 main
 
