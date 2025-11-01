@@ -149,7 +149,8 @@ _frxt_int_exit:
 _xt_level1_int_handler_entry:
     /* ULTRA-MINIMAL ISR for diagnosis - only increment counter and clear flags */
     
-    /* Save only a2, a3 (minimal save) */
+    /* Save only a0, a2, a3 (minimal save) */
+    s32i    a0, sp, XT_STK_A0
     s32i    a2, sp, XT_STK_A2
     s32i    a3, sp, XT_STK_A3
     
@@ -183,25 +184,12 @@ _xt_level1_int_handler_entry:
     wsr.intclear a2
     rsync
     
-    /* Restore a2, a3 */
+    /* Restore registers in reverse order */
     l32i    a3, sp, XT_STK_A3
     l32i    a2, sp, XT_STK_A2
-    
-    /* Restore PS */
-    l32i    a0, sp, XT_STK_PS
-    wsr.ps  a0
-    
-    /* Restore PC to EPC1 */
-    l32i    a0, sp, XT_STK_PC
-    wsr.epc1 a0
-    
-    /* Restore A0 */
     l32i    a0, sp, XT_STK_A0
     
-    /* Restore SP */
-    l32i    sp, sp, XT_STK_A1
-    
-    /* Sync and return */
+    /* Return from exception - CPU restores PC from EPC1 and PS automatically */
     rsync
     rfe
 

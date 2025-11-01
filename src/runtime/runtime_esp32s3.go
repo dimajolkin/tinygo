@@ -427,7 +427,9 @@ var _ebss [0]byte
 // initSystimerTick configures SYSTIMER TARGET0 to generate periodic interrupts every 10ms
 // and routes it to a CPU interrupt channel via the Interrupt Matrix.
 func initSystimerTick() {
-	const systimerClockHz = 80_000_000 // assumed SYSTIMER clock
+	// CRITICAL: ESP32-S3 SYSTIMER runs at 16MHz (40MHz XTAL / 2.5 divider)
+	// Source: ESP-IDF components/esp_hw_support/port/esp32s3/systimer.c
+	const systimerClockHz = 16_000_000 // 16MHz (NOT 80MHz!)
 	const tickPeriodNs = 1_000_000     // 1ms
 	const cpuInterruptForSystimer = 23 // CPU-level interrupt line
 
@@ -436,6 +438,7 @@ func initSystimerTick() {
 	if periodTicks == 0 {
 		periodTicks = 1
 	}
+	println("SYST: SYSTIMER frequency: 16MHz, period:", tickPeriodNs, "ns =", periodTicks, "ticks")
 
 	// Temporarily block interrupts during configuration
 	old := interrupt.Disable()
@@ -454,63 +457,36 @@ func initSystimerTick() {
 	actualMapping := esp.INTERRUPT_CORE0.GetSYSTIMER_TARGET0_INT_MAP()
 	println("SYST: Verified mapping:", actualMapping, "(expected:", cpuInterruptForSystimer, ")")
 
-	// Ensure SYSTIMER clocks enabled
+	// === ESP-IDF-style SYSTIMER initialization ===
+	// 1. Enable clocks and counters (they run continuously)
 	esp.SYSTIMER.SetCONF_SYSTIMER_CLK_FO(1)
 	esp.SYSTIMER.CONF.Set(esp.SYSTIMER.CONF.Get() | esp.SYSTIMER_CONF_CLK_EN)
-	esp.SYSTIMER.SetCONF_TIMER_UNIT0_WORK_EN(1)
-	esp.SYSTIMER.SetCONF_TIMER_UNIT1_WORK_EN(1)
+	esp.SYSTIMER.SetCONF_TIMER_UNIT0_WORK_EN(1) // Enable UNIT0
+	esp.SYSTIMER.SetCONF_TIMER_UNIT1_WORK_EN(1) // Enable UNIT1
+	println("SYST: Counters running")
 
-	// Configure TARGET0 to use UNIT1 (one-shot mode for simplicity)
-	// In one-shot mode, we program absolute target value in TARGET0_LO/HI
+	// 2. Configure TARGET0: connect to UNIT1, PERIODIC mode
 	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_TIMER_UNIT_SEL(1) // Use UNIT1
-	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD_MODE(0)    // One-shot mode (NOT periodic!)
-	// esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD(periodTicks)  // Not used in one-shot mode
-	println("SYST: TARGET0 configured for one-shot mode")
+	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD_MODE(1)    // PERIODIC mode!
+	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD(periodTicks) // Set period
+	println("SYST: TARGET0 -> UNIT1, periodic mode, period:", periodTicks)
 
-	// Register interrupt handler
+	// 3. Register interrupt handler
 	println("SYST: Registering handler...")
 	_ = interrupt.New(cpuInterruptForSystimer, systimerHandleInterrupt)
 	println("SYST: Handler registered")
 
-	// Program first shot: latch UNIT1, wait valid, set TARGET0 = now + period
-	println("SYST: Reading current timer value...")
-	esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
-	for esp.SYSTIMER.GetUNIT1_OP_TIMER_UNIT1_VALUE_VALID() == 0 {
-	}
-	nowLo := esp.SYSTIMER.UNIT1_VALUE_LO.Get()
-	nowHi := esp.SYSTIMER.UNIT1_VALUE_HI.Get()
-	println("SYST: Current time: HI=", nowHi, "LO=", nowLo)
-
-	tgtLo := nowLo + periodTicks
-	tgtHi := nowHi
-	if tgtLo < nowLo {
-		tgtHi++
-	}
-	println("SYST: Setting TARGET0: HI=", tgtHi, "LO=", tgtLo, "(period=", periodTicks, ")")
-
-	esp.SYSTIMER.SetTARGET0_HI_TIMER_TARGET0_HI(tgtHi & 0xFFFFF)
-	esp.SYSTIMER.SetTARGET0_LO(tgtLo)
-	esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1)
-
-	println("SYST: TARGET0 programmed and loaded")
-
-	// Clear any pending status and enable SYSTIMER interrupt bit
+	// 4. For PERIODIC mode: just enable, no need to program absolute target
+	println("SYST: Clearing INT and enabling interrupt...")
 	esp.SYSTIMER.INT_CLR.Set(1 << 0)
 	esp.SYSTIMER.INT_ENA.SetBits(1 << 0)
-	println("SYST: Peripheral INT enabled")
 
-	// Clear any pending peripheral interrupt BEFORE arming
-	esp.SYSTIMER.INT_CLR.Set(1 << 0)
-	println("SYST: Cleared pending INT")
+	println("SYST: Applying period (COMP_LOAD)...")
+	esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1)
 
-	// Arm TARGET0 comparator (this enables interrupt generation)
-	println("SYST: About to enable TARGET0 (WORK_EN=1)...")
-	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(1)
-	println("SYST: TARGET0 enabled (WORK_EN=1)")
-
-	// Verify CONF register
-	confVal := esp.SYSTIMER.CONF.Get()
-	println("SYST: CONF after WORK_EN:", confVal)
+	println("SYST: Enabling alarm (WORK_EN=1)...")
+	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(1) // Enable alarm!
+	println("SYST: Periodic alarm armed!")
 
 	// Verify interrupts are still disabled before Restore
 	psBeforeRestore := device.AsmFull("rsr.ps {}", nil)
@@ -590,57 +566,117 @@ func initSystimerTick() {
 	var isrCallCount [1]uint32
 	println("SYST: ASM ISR counter before:", isrCallCount[0])
 
-	// Step 2: Start timer briefly, count interrupts
-	println("SYST: Starting timer for a short time...")
+	// Step 2: Reprogram alarm with ESP-IDF retry logic
+	println("SYST: Reprogramming alarm...")
+	interrupt.SetPSIntLevel(15) // Disable IRQs
 
-	// CRITICAL FIX: Disable interrupts BEFORE starting timer!
-	println("SYST: Disabling IRQs before timer start...")
-	interrupt.SetPSIntLevel(15)
-	println("SYST: IRQs disabled (INTLEVEL=15)")
+	// ESP-IDF systimer_hal_set_alarm_target() with retry loop
+	// Source: components/hal/systimer_hal.c (ESP32-S3 uses non-compensate version)
+	const offset = uint32(32) // 2us @ 16MHz (safety margin)
 
-	println("SYST: About to clear INT_CLR...")
+	for retry := 0; retry < 10; retry++ {
+		// Read current time
+		esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
+		for esp.SYSTIMER.GetUNIT1_OP_TIMER_UNIT1_VALUE_VALID() == 0 {
+		}
+		nowLo = esp.SYSTIMER.UNIT1_VALUE_LO.Get()
+		nowHi = esp.SYSTIMER.UNIT1_VALUE_HI.Get()
+
+		// Calculate target = now + period + offset
+		tgtLo = nowLo + periodTicks + offset
+		tgtHi = nowHi
+		if tgtLo < nowLo {
+			tgtHi++
+		}
+
+		// ESP-IDF sequence: disable -> set_target -> apply -> enable
+		esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(0) // Disable
+		esp.SYSTIMER.SetTARGET0_HI_TIMER_TARGET0_HI(tgtHi & 0xFFFFF)
+		esp.SYSTIMER.SetTARGET0_LO(tgtLo)
+		esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1) // Apply
+		esp.SYSTIMER.INT_CLR.Set(1 << 0)               // Clear flag
+		esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(1)        // Enable
+
+		// Check if we missed the target (ESP-IDF does this)
+		esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
+		for esp.SYSTIMER.GetUNIT1_OP_TIMER_UNIT1_VALUE_VALID() == 0 {
+		}
+		checkLo := esp.SYSTIMER.UNIT1_VALUE_LO.Get()
+		checkHi := esp.SYSTIMER.UNIT1_VALUE_HI.Get()
+
+		// If target > now OR interrupt already fired, we're good
+		intFired := (esp.SYSTIMER.INT_ST.Get() & 1) != 0
+		targetMissed := (checkHi > tgtHi) || (checkHi == tgtHi && checkLo >= tgtLo)
+
+		if !targetMissed || intFired {
+			println("SYST: Alarm set successfully on attempt", retry+1)
+			break
+		}
+
+		println("SYST: Target missed, retrying... (attempt", retry+1, ")")
+	}
+
+	// Verify alarm state before enabling IRQs
+	esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
+	for esp.SYSTIMER.GetUNIT1_OP_TIMER_UNIT1_VALUE_VALID() == 0 {
+	}
+	nowLo = esp.SYSTIMER.UNIT1_VALUE_LO.Get()
+	nowHi = esp.SYSTIMER.UNIT1_VALUE_HI.Get()
+	println("SYST: Before enabling IRQs:")
+	println("  Current:", nowHi, nowLo)
+	println("  Target:", tgtHi, tgtLo)
+	println("  INT_ST:", esp.SYSTIMER.INT_ST.Get())
+	println("  CONF:", esp.SYSTIMER.CONF.Get())
+
+	// Check if target already passed
+	if (nowHi > tgtHi) || (nowHi == tgtHi && nowLo >= tgtLo) {
+		println("  ⚠️  WARNING: Target already passed!")
+	} else {
+		println("  ✓ Target is in future")
+	}
+
+	// CRITICAL: Clear INT_ST flag RIGHT before enabling IRQs!
+	// Otherwise if target passed during diagnostics, INT fires immediately
+	println("SYST: Clearing INT_ST before SetPSIntLevel...")
 	esp.SYSTIMER.INT_CLR.Set(1 << 0)
-	println("SYST: Cleared INT_CLR")
 
-	println("SYST: About to start timer (WORK_EN=1)...")
-	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(1)
-	println("SYST: Timer started!")
+	// Also clear CPU interrupt line
+	device.AsmFull("wsr.intclear {v}", map[string]interface{}{
+		"v": uintptr(1 << 23),
+	})
+	device.AsmFull("rsync", nil)
 
-	println("SYST: Clearing INT_CLR after timer start...")
-	esp.SYSTIMER.INT_CLR.Set(1 << 0)
-	println("SYST: Cleared")
+	println("SYST: Flags cleared, now enabling IRQs (SetPSIntLevel(0))...")
+	interrupt.SetPSIntLevel(0) // Enable IRQs
+	println("SYST: Returned from SetPSIntLevel!")
 
-	// NOW enable interrupts - let a few fire
-	println("SYST: Re-enabling IRQs (INTLEVEL=0)...")
-	interrupt.SetPSIntLevel(0)
-	println("SYST: IRQs enabled!")
+	println("SYST: IRQs enabled, starting wait loop...")
 
-	// Wait a tiny bit (let a few interrupts fire)
-	println("SYST: Starting nop loop...")
-	for i := 0; i < 100; i++ {
+	// Wait a bit
+	for i := 0; i < 100000; i++ {
+		if i%10000 == 0 {
+			println("SYST: Loop iteration", i, "ASM count:", isrCallCount[0])
+		}
 		device.Asm("nop")
 	}
-	println("SYST: Finished nop loop")
 
-	// Stop timer immediately
-	println("SYST: About to disable IRQs again...")
+	println("SYST: Wait loop completed, stopping alarm...")
+
+	// Stop alarm
 	interrupt.SetPSIntLevel(15)
 	println("SYST: IRQs disabled")
 
-	println("SYST: About to stop timer...")
 	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(0)
-	println("SYST: Timer stopped")
+	println("SYST: Alarm disabled")
 
-	println("SYST: About to clear INT_CLR again...")
 	esp.SYSTIMER.INT_CLR.Set(1 << 0)
-	println("SYST: Cleared INT_CLR")
+	println("SYST: INT cleared")
 
-	println("SYST: About to restore IRQs...")
 	interrupt.SetPSIntLevel(0)
 	println("SYST: IRQs restored")
 
-	println("SYST: Timer test completed!")
-	println("SYST: ASM ISR counter after:", isrCallCount[0])
+	println("SYST: Test completed!")
+	println("SYST: ASM ISR counter:", isrCallCount[0])
 
 	// Check results
 	endHandlerCount := interrupt.GetHandleInterruptCallCount()
