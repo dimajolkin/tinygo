@@ -46,23 +46,19 @@ _frxt_int_enter:
     addi    a4, a4, 1
     s32i    a4, a3, 0           // Сохранить новую глубину
     
-    // Разрешить более высокие уровни прерываний
-    // PS регистр содержит INTLEVEL в битах [3:0]
-    // Установить INTLEVEL на (уровень - 1)
-    rsr     a3, PS
-    movi    a4, 0xFFFFFFF0       // очистить младшие 4 бита INTLEVEL
-    and     a3, a3, a4
-
-    // Вычесть 1 из уровня для разрешения более высоких
-    addi    a2, a2, -1
-    movi    a4, 0x7
-    and     a2, a2, a4           // ограничить до 0..7
-
-    // Объединить новый уровень с PS и разрешить прерывания от уровня 0
-    // (INTLEVEL = max(0, level-1))
-    or      a3, a3, a2
-    wsr     a3, PS
-    rsync
+    // TEMPORARY: DO NOT change INTLEVEL to avoid nested interrupts during debugging
+    // Keep INTLEVEL high (set by hardware when entering exception)
+    // This prevents re-entrant interrupts
+    // TODO: Re-enable this once basic interrupts work
+    // rsr     a3, PS
+    // movi    a4, 0xFFFFFFF0       // очистить младшие 4 бита INTLEVEL
+    // and     a3, a3, a4
+    // addi    a2, a2, -1
+    // movi    a4, 0x7
+    // and     a2, a2, a4           // ограничить до 0..7
+    // or      a3, a3, a2
+    // wsr     a3, PS
+    // rsync
     
     ret
 
@@ -125,96 +121,27 @@ _frxt_int_exit:
 .type _xt_level1_int_handler_entry,@function
 
 _xt_level1_int_handler_entry:
-    /* Minimal context (A0, A1, PS, PC, EXIT) already saved by _xt_lowint1
-       Now save the rest: A2-A15 and special registers */
+    /* TEMPORARY: Absolutely minimal handler for testing ISR entry/exit
+     * _xt_lowint1 already saved A0, A1, PS, PC on stack
+     * We just restore them and return directly */
     
-    /* Save A2-A15 */
-    s32i    a2, sp, XT_STK_A2
-    s32i    a3, sp, XT_STK_A3
-    s32i    a4, sp, XT_STK_A4
-    s32i    a5, sp, XT_STK_A5
-    s32i    a6, sp, XT_STK_A6
-    s32i    a7, sp, XT_STK_A7
-    s32i    a8, sp, XT_STK_A8
-    s32i    a9, sp, XT_STK_A9
-    s32i    a10, sp, XT_STK_A10
-    s32i    a11, sp, XT_STK_A11
-    s32i    a12, sp, XT_STK_A12
-    s32i    a13, sp, XT_STK_A13
-    s32i    a14, sp, XT_STK_A14
-    s32i    a15, sp, XT_STK_A15
+    /* Restore PS */
+    l32i    a0, sp, XT_STK_PS
+    wsr.ps  a0
     
-    /* Save special registers (use dot notation) */
-    rsr.sar a2
-    s32i    a2, sp, XT_STK_SAR
+    /* Restore PC to EPC1 */
+    l32i    a0, sp, XT_STK_PC
+    wsr.epc1 a0
     
-    rsr.exccause a2
-    s32i    a2, sp, XT_STK_EXCCAUSE
+    /* Restore A0 */
+    l32i    a0, sp, XT_STK_A0
     
-    rsr.excvaddr a2
-    s32i    a2, sp, XT_STK_EXCVADDR
+    /* Restore SP */
+    l32i    sp, sp, XT_STK_A1
     
-    rsr.lbeg a2
-    s32i    a2, sp, XT_STK_LBEG
-    
-    rsr.lend a2
-    s32i    a2, sp, XT_STK_LEND
-    
-    rsr.lcount a2
-    s32i    a2, sp, XT_STK_LCOUNT
-    
-    /* Call RTOS interrupt entry hook - sets PS.INTLEVEL=0 (level-1) */
-    movi    a2, 1                           /* interrupt level 1 */
-    call0   _frxt_int_enter
-    
-    /* Clear EXCM bit to allow nested interrupts
-     * After _frxt_int_enter, PS.INTLEVEL is already 0 (correct for level 1)
-     * We just need to clear EXCM (bit 4) to enable higher-priority interrupts
-     * Note: EXCM was set automatically by the exception/interrupt hardware */
-    rsr.ps  a0                              /* use dot notation */
-    movi    a2, ~(1 << 4)                   /* mask to clear EXCM bit */
-    and     a0, a0, a2
-    wsr.ps  a0                              /* use dot notation */
+    /* Sync and return */
     rsync
-    
-    /* Call Go interrupt handler */
-    call0   handleInterrupt
-    
-    /* Call RTOS interrupt exit hook */
-    call0   _frxt_int_exit
-    
-    /* Restore special registers (use dot notation) */
-    l32i    a2, sp, XT_STK_SAR
-    wsr.sar a2
-    
-    l32i    a2, sp, XT_STK_LBEG
-    wsr.lbeg a2
-    
-    l32i    a2, sp, XT_STK_LEND
-    wsr.lend a2
-    
-    l32i    a2, sp, XT_STK_LCOUNT
-    wsr.lcount a2
-    
-    /* Restore A2-A15 */
-    l32i    a2, sp, XT_STK_A2
-    l32i    a3, sp, XT_STK_A3
-    l32i    a4, sp, XT_STK_A4
-    l32i    a5, sp, XT_STK_A5
-    l32i    a6, sp, XT_STK_A6
-    l32i    a7, sp, XT_STK_A7
-    l32i    a8, sp, XT_STK_A8
-    l32i    a9, sp, XT_STK_A9
-    l32i    a10, sp, XT_STK_A10
-    l32i    a11, sp, XT_STK_A11
-    l32i    a12, sp, XT_STK_A12
-    l32i    a13, sp, XT_STK_A13
-    l32i    a14, sp, XT_STK_A14
-    l32i    a15, sp, XT_STK_A15
-    
-    /* Jump to exit point (restores A0, A1, PS, PC and does RFE) */
-    l32i    a0, sp, XT_STK_EXIT
-    jx      a0
+    rfe
 
 /*
  * _xt_unhandled_exception - Обработчик необработанного исключения

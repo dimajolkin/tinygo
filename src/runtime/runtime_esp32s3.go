@@ -490,13 +490,6 @@ func initSystimerTick() {
 	esp.SYSTIMER.INT_CLR.Set(1 << 0)
 	println("SYST: Cleared pending INT")
 
-	// Enable CPU interrupt line for SYSTIMER through INTENABLE (while interrupts disabled)
-	ien := device.AsmFull("rsr.intenable {}", nil)
-	ien |= (1 << cpuInterruptForSystimer)
-	device.AsmFull("wsr.intenable {v}", map[string]interface{}{"v": ien})
-	device.AsmFull("rsync", nil)
-	println("SYST: INTENABLE bit 23 set")
-
 	// Arm periodic alarm (this starts the timer)
 	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(1)
 	println("SYST: WORK_EN set, timer armed")
@@ -519,16 +512,49 @@ func initSystimerTick() {
 	psAfterRestore := device.AsmFull("rsr.ps {}", nil)
 	intlevelAfter := uint32(uintptr(psAfterRestore)) & 0x0F
 	println("SYST: After Restore(), INTLEVEL=", intlevelAfter, "(should be", uint32(old), ")")
-	println("SYST: Interrupts now ACTIVE!")
+	println("SYST: PS.INTLEVEL restored, now enabling CPU interrupt line...")
+
+	// NOW enable CPU interrupt line for SYSTIMER through INTENABLE
+	println("SYST: Reading INTENABLE...")
+	ien := device.AsmFull("rsr.intenable {}", nil)
+	println("SYST: Current INTENABLE:", uint32(uintptr(ien)))
+
+	println("SYST: Setting bit 23...")
+	ien |= (1 << cpuInterruptForSystimer)
+	println("SYST: New INTENABLE:", uint32(uintptr(ien)))
+
+	// CRITICAL: Clear any pending SYSTIMER interrupt RIGHT before enabling INTENABLE
+	// Otherwise we get infinite interrupt loop!
+	println("SYST: Clearing SYSTIMER INT_ST before enabling INTENABLE...")
+	esp.SYSTIMER.INT_CLR.Set(1 << 0)
+
+	// Also clear CPU interrupt if pending
+	device.AsmFull("wsr.intclear {v}", map[string]interface{}{
+		"v": uintptr(1 << cpuInterruptForSystimer),
+	})
+	device.AsmFull("rsync", nil)
+	println("SYST: Cleared, now writing INTENABLE...")
+
+	device.AsmFull("wsr.intenable {v}", map[string]interface{}{"v": ien})
+	println("SYST: Wrote INTENABLE, doing rsync...")
+
+	device.AsmFull("rsync", nil)
+	println("SYST: INTENABLE bit 23 set - interrupts now ACTIVE!")
 
 	// Wait 10ms for at least one interrupt to fire
 	println("SYST: Waiting for first interrupt...")
 	startCount := systimerIRQCount
 	startHandlerCount := interrupt.GetHandleInterruptCallCount()
 
-	// TEST: Temporarily disable interrupts to see if loop completes
+	// TEST: Disable interrupts FIRST before touching timer
 	println("SYST: Test - disabling IRQs temporarily...")
 	interrupt.SetPSIntLevel(15)
+
+	// Now safe to stop timer
+	println("SYST: Stopping SYSTIMER to prevent infinite ISR loop...")
+	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(0) // Stop timer
+	esp.SYSTIMER.INT_CLR.Set(1 << 0)        // Clear any pending
+	println("SYST: SYSTIMER stopped")
 
 	// Simple busy wait
 	println("SYST: Starting busy wait...")
@@ -538,8 +564,9 @@ func initSystimerTick() {
 	println("SYST: Busy wait completed!")
 
 	// Re-enable interrupts
-	//println("SYST: Re-enabling IRQs...")
+	println("SYST: Re-enabling IRQs...")
 	interrupt.SetPSIntLevel(0)
+	println("SYST: IRQs re-enabled (timer still stopped)")
 
 	// Now wait for interrupt
 	println("SYST: Waiting with IRQs enabled...")

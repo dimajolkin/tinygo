@@ -27,7 +27,7 @@ func Disable() (state State) {
 	//   __asm__ __volatile__("rsil %0, 15\n" : "=a" (__tmp) : : "memory");
 	// RSIL reads old PS into result register and sets PS.INTLEVEL to immediate value
 	ps := device.AsmFull("rsil {}, 15", nil)
-	
+
 	// Extract and return only the INTLEVEL field (bits [3:0])
 	// This matches ESP-IDF's portSET_INTERRUPT_MASK() behavior:
 	//   prev_level = ((prev_level >> SHIFT) & MASK);
@@ -40,25 +40,18 @@ func Disable() (state State) {
 // calling Disable, this will not re-enable interrupts, allowing for nested
 // critical sections.
 func Restore(state State) {
-	print("R1 ")  // DEBUG: Entered Restore
-	
 	// Read CURRENT PS register (it may have changed since Disable!)
 	currentPS := device.AsmFull("rsr.ps {}", nil)
-	print("R2 ")  // DEBUG: Read current PS
-	
+
 	// Modify only the INTLEVEL field (bits [3:0]), preserve all other bits
 	// This matches ESP-IDF's portCLEAR_INTERRUPT_MASK() behavior
 	newPS := (uintptr(currentPS) &^ 0x0F) | (uintptr(state) & 0x0F)
-	print("R3 ")  // DEBUG: Calculated new PS
-	
+
 	// Write back the modified PS register
 	device.AsmFull("wsr.ps {v}", map[string]interface{}{
 		"v": newPS,
 	})
-	print("R4 ")  // DEBUG: Wrote PS
-	
 	device.AsmFull("rsync", nil)
-	print("R5\n")  // DEBUG: Done rsync
 }
 
 // In returns whether the system is currently in an interrupt.
@@ -83,28 +76,28 @@ var handleInterruptCallCount uint32
 //
 //export handleInterrupt
 func handleInterrupt() {
-	// Increment debug counter (ISR-safe)
+	// TEMPORARY: Only increment counter and return immediately
+	// This tests if basic ISR entry/exit works
 	handleInterruptCallCount++
 
+	// TODO: Uncomment actual interrupt handling once basic flow works
 	// Read INTERRUPT register to see which CPU interrupt line triggered
-	interruptReg := device.AsmFull("rsr.interrupt {}", nil)
-	interruptMask := uint32(uintptr(interruptReg))
-
+	// interruptReg := device.AsmFull("rsr.interrupt {}", nil)
+	// interruptMask := uint32(uintptr(interruptReg))
 	// Find which interrupt line is active
 	// ESP32-S3 has 32 interrupt lines (0-31)
-	for i := uint32(0); i < 32; i++ {
-		if interruptMask&(1<<i) != 0 {
-			// Clear this CPU interrupt (write-1-to-clear via INTCLEAR register)
-			device.AsmFull("wsr.intclear {v}", map[string]interface{}{
-				"v": uintptr(1 << i),
-			})
-			device.AsmFull("rsync", nil)
-
-			// Call registered handler for this interrupt line
-			callHandler(int(i))
-			break // Handle only one interrupt at a time
-		}
-	}
+	// for i := uint32(0); i < 32; i++ {
+	// 	if interruptMask&(1<<i) != 0 {
+	// 		// Clear this CPU interrupt (write-1-to-clear via INTCLEAR register)
+	// 		device.AsmFull("wsr.intclear {v}", map[string]interface{}{
+	// 			"v": uintptr(1 << i),
+	// 		})
+	// 		device.AsmFull("rsync", nil)
+	// 		// Call registered handler for this interrupt line
+	// 		callHandler(int(i))
+	// 		break // Handle only one interrupt at a time
+	// 	}
+	// }
 }
 
 //export handleException
