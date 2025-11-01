@@ -538,6 +538,17 @@ func initSystimerTick() {
 	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD(periodTicks) // Set period (16000 ticks = 1ms @ 16MHz)
 	println("SYST: TARGET0 -> UNIT0, periodic mode, period:", periodTicks)
 
+	// Configure counter stall behavior (ESP-IDF does this!)
+	// ESP-IDF: systimer_hal_counter_can_stall_by_cpu(&systimer_hal, SYSTIMER_COUNTER_OS_TICK, cpuid, true);
+	// File: components/freertos/port_systick.c:85
+	// Formula: bit = (28 - counter_id * 2) - cpu_id = (28 - 0*2) - 0 = 28
+	// This allows CPU0 to stall UNIT0 counter (useful for debugging)
+	println("SYST: Configuring counter stall for CPU0...")
+	confStall := esp.SYSTIMER.CONF.Get()
+	confStall |= (1 << 28) // Enable stall for UNIT0 by CPU0
+	esp.SYSTIMER.CONF.Set(confStall)
+	println("SYST: Counter can stall by CPU0")
+
 	// 3. Register interrupt handler
 	println("SYST: Registering handler...")
 	_ = interrupt.New(cpuInterruptForSystimer, systimerHandleInterrupt)
