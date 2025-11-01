@@ -181,8 +181,6 @@ func main() {
 	// Initialize SYSTIMER for system tick
 	initSystimerTick()
 
-	checkVectorsInMemory()
-
 	// Call the standard runtime
 	run()
 
@@ -479,6 +477,17 @@ func initSystimerTick() {
 	psAfterDisable := device.AsmFull("rsr.ps {}", nil)
 	intlevelNow := uint32(uintptr(psAfterDisable)) & 0x0F
 	println("SYST: Current INTLEVEL (should be 15):", intlevelNow)
+
+	// === CRITICAL: Enable SYSTIMER peripheral clock and reset ===
+	// ESP-IDF: systimer_ll_enable_bus_clock(true) + systimer_ll_reset_register()
+	// File: components/hal/esp32s3/include/hal/systimer_ll.h:39-50
+	// Without this, SYSTIMER peripheral is DEAD (no interrupts, no counter updates)!
+	println("SYST: Enabling SYSTIMER bus clock...")
+	esp.SYSTEM.SetPERIP_CLK_EN0_SYSTIMER_CLK_EN(1)
+	println("SYST: Resetting SYSTIMER peripheral...")
+	esp.SYSTEM.SetPERIP_RST_EN0_SYSTIMER_RST(1) // Assert reset
+	esp.SYSTEM.SetPERIP_RST_EN0_SYSTIMER_RST(0) // Release reset
+	println("SYST: SYSTIMER peripheral ready!")
 
 	// Map SYSTIMER TARGET0 to selected CPU interrupt channel on core0
 	println("SYST: Mapping SYSTIMER_TARGET0 to CPU interrupt", cpuInterruptForSystimer)
