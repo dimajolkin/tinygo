@@ -527,16 +527,32 @@ func initSystimerTick() {
 	esp.SYSTIMER.SetCONF_TIMER_UNIT0_WORK_EN(1)
 	println("SYST: UNIT0 counter enabled")
 
-	// 4. Configure TARGET0: connect to UNIT0, PERIODIC mode
+	// 4. Configure TARGET0 - CRITICAL: Two-step initialization like ESP-IDF!
+	// ESP-IDF sequence (port_systick.c:93-103):
+	//   Step 1: systimer_hal_select_alarm_mode(..., SYSTIMER_ALARM_MODE_ONESHOT)  [line 94]
+	//   Step 2: systimer_hal_set_alarm_period(...)                                [line 102]
+	//   Step 3: systimer_hal_select_alarm_mode(..., SYSTIMER_ALARM_MODE_PERIOD)   [line 103]
+	// WHY: Hardware requires ONESHOT mode init before switching to PERIOD mode!
+
+	// Step 1: Connect to UNIT0 and set ONESHOT mode first (CRITICAL!)
 	// ESP-IDF: systimer_hal_connect_alarm_counter(&systimer_hal, alarm_id, SYSTIMER_COUNTER_OS_TICK);
-	//          systimer_hal_set_alarm_period(&systimer_hal, alarm_id, 1000000UL / CONFIG_FREERTOS_HZ);
-	//          systimer_hal_select_alarm_mode(&systimer_hal, alarm_id, SYSTIMER_ALARM_MODE_PERIOD);
-	// File: components/freertos/port_systick.c:82-84
-	// SYSTIMER_COUNTER_OS_TICK = 0 (UNIT0), CONFIG_FREERTOS_HZ = 1000 (1ms tick)
-	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_TIMER_UNIT_SEL(0)   // Connect to UNIT0
-	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD_MODE(1)      // PERIODIC mode
+	//          systimer_hal_select_alarm_mode(&systimer_hal, alarm_id, SYSTIMER_ALARM_MODE_ONESHOT);
+	println("SYST: Step 1: Configuring TARGET0 as ONESHOT initially...")
+	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_TIMER_UNIT_SEL(0) // Connect to UNIT0
+	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD_MODE(0)    // ONESHOT mode (period_mode = 0)
+	println("SYST: TARGET0 -> UNIT0, ONESHOT mode (temporary)")
+
+	// Step 2: Set period value
+	// ESP-IDF: systimer_hal_set_alarm_period(&systimer_hal, alarm_id, 1000000UL / CONFIG_FREERTOS_HZ);
+	println("SYST: Step 2: Setting period...")
 	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD(periodTicks) // Set period (16000 ticks = 1ms @ 16MHz)
-	println("SYST: TARGET0 -> UNIT0, periodic mode, period:", periodTicks)
+	println("SYST: Period set to", periodTicks, "ticks")
+
+	// Step 3: Switch to PERIODIC mode
+	// ESP-IDF: systimer_hal_select_alarm_mode(&systimer_hal, alarm_id, SYSTIMER_ALARM_MODE_PERIOD);
+	println("SYST: Step 3: Switching to PERIODIC mode...")
+	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD_MODE(1) // PERIODIC mode (period_mode = 1)
+	println("SYST: TARGET0 now in PERIODIC mode!")
 
 	// Configure counter stall behavior (ESP-IDF does this!)
 	// ESP-IDF: systimer_hal_counter_can_stall_by_cpu(&systimer_hal, SYSTIMER_COUNTER_OS_TICK, cpuid, true);
@@ -576,18 +592,22 @@ func initSystimerTick() {
 	println("SYST: Applying period via COMP_LOAD...")
 	esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1)
 
-	// Clear and enable interrupt
-	// ESP-IDF: systimer_hal_enable_alarm_int(&systimer_hal, alarm_id)
-	// File: components/freertos/port_systick.c:87
-	println("SYST: Clearing INT and enabling interrupt...")
+	// Clear interrupt flags
+	println("SYST: Clearing INT...")
 	esp.SYSTIMER.INT_CLR.Set(1 << 0)
-	esp.SYSTIMER.INT_ENA.SetBits(1 << 0)
 
-	// Enable alarm
+	// Enable alarm FIRST (like ESP-IDF!)
 	// ESP-IDF: systimer_ll_enable_alarm(dev, alarm_id, true)
 	// Implementation: dev->conf.val |= 1 << (24 - alarm_id)
+	// File: components/hal/systimer_hal.c:119 (inside systimer_hal_set_alarm_period)
 	println("SYST: Enabling alarm (WORK_EN=1)...")
 	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(1)
+
+	// THEN enable interrupt (like ESP-IDF!)
+	// ESP-IDF: systimer_hal_enable_alarm_int(&systimer_hal, alarm_id)
+	// File: components/freertos/port_systick.c:87
+	println("SYST: Enabling interrupt (INT_ENA)...")
+	esp.SYSTIMER.INT_ENA.SetBits(1 << 0)
 
 	// Verify it was set
 	confAfter := esp.SYSTIMER.CONF.Get()
@@ -732,15 +752,15 @@ func initSystimerTick() {
 		println("  TARGET0_LO:", esp.SYSTIMER.TARGET0_LO.Get())
 		println("  TARGET0_HI:", esp.SYSTIMER.TARGET0_HI.Get())
 
-		// Read current timer value
-		esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
-		for esp.SYSTIMER.GetUNIT1_OP_TIMER_UNIT1_VALUE_VALID() == 0 {
+		// Read current UNIT0 timer value (TARGET0 is connected to UNIT0!)
+		esp.SYSTIMER.SetUNIT0_OP_TIMER_UNIT0_UPDATE(1)
+		for esp.SYSTIMER.GetUNIT0_OP_TIMER_UNIT0_VALUE_VALID() == 0 {
 		}
-		currentLo := esp.SYSTIMER.UNIT1_VALUE_LO.Get()
-		currentHi := esp.SYSTIMER.UNIT1_VALUE_HI.Get()
-		println("  UNIT1_VALUE_LO:", currentLo)
-		println("  UNIT1_VALUE_HI:", currentHi)
-		println("  UNIT1_OP:", esp.SYSTIMER.UNIT1_OP.Get())
+		currentLo := esp.SYSTIMER.UNIT0_VALUE_LO.Get()
+		currentHi := esp.SYSTIMER.UNIT0_VALUE_HI.Get()
+		println("  UNIT0_VALUE_LO:", currentLo)
+		println("  UNIT0_VALUE_HI:", currentHi)
+		println("  UNIT0_OP:", esp.SYSTIMER.UNIT0_OP.Get())
 
 		// Check Interrupt Matrix
 		actualMap := esp.INTERRUPT_CORE0.GetSYSTIMER_TARGET0_INT_MAP()
@@ -749,6 +769,13 @@ func initSystimerTick() {
 		// Check if target was reached
 		if currentLo > esp.SYSTIMER.TARGET0_LO.Get() {
 			println("  ⚠️  Counter PASSED target but INT_ST=0!")
+		}
+
+		// Check INT_RAW - shows interrupt before masking
+		intRaw := esp.SYSTIMER.INT_RAW.Get()
+		println("  INT_RAW:", intRaw, "(shows interrupt status before INT_ENA mask)")
+		if intRaw != 0 {
+			println("  ⚠️  INT_RAW is set but INT_ST=0! Problem with INT_ENA or interrupt routing!")
 		}
 	}
 }
