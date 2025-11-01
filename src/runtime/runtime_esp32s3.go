@@ -447,7 +447,12 @@ func initSystimerTick() {
 	println("SYST: Current INTLEVEL (should be 15):", intlevelNow)
 
 	// Map SYSTIMER TARGET0 to selected CPU interrupt channel on core0
+	println("SYST: Mapping SYSTIMER_TARGET0 to CPU interrupt", cpuInterruptForSystimer)
 	esp.INTERRUPT_CORE0.SetSYSTIMER_TARGET0_INT_MAP(cpuInterruptForSystimer)
+
+	// Verify the mapping was written
+	actualMapping := esp.INTERRUPT_CORE0.GetSYSTIMER_TARGET0_INT_MAP()
+	println("SYST: Verified mapping:", actualMapping, "(expected:", cpuInterruptForSystimer, ")")
 
 	// Ensure SYSTIMER clocks enabled
 	esp.SYSTIMER.SetCONF_SYSTIMER_CLK_FO(1)
@@ -455,11 +460,12 @@ func initSystimerTick() {
 	esp.SYSTIMER.SetCONF_TIMER_UNIT0_WORK_EN(1)
 	esp.SYSTIMER.SetCONF_TIMER_UNIT1_WORK_EN(1)
 
-	// Configure periodic mode on UNIT1 for TARGET0 and set period
-	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_TIMER_UNIT_SEL(1)
-	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD_MODE(1)
-	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD(periodTicks)
-	esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1)
+	// Configure TARGET0 to use UNIT1 (one-shot mode for simplicity)
+	// In one-shot mode, we program absolute target value in TARGET0_LO/HI
+	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_TIMER_UNIT_SEL(1) // Use UNIT1
+	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD_MODE(0)    // One-shot mode (NOT periodic!)
+	// esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD(periodTicks)  // Not used in one-shot mode
+	println("SYST: TARGET0 configured for one-shot mode")
 
 	// Register interrupt handler
 	println("SYST: Registering handler...")
@@ -467,19 +473,26 @@ func initSystimerTick() {
 	println("SYST: Handler registered")
 
 	// Program first shot: latch UNIT1, wait valid, set TARGET0 = now + period
+	println("SYST: Reading current timer value...")
 	esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
 	for esp.SYSTIMER.GetUNIT1_OP_TIMER_UNIT1_VALUE_VALID() == 0 {
 	}
 	nowLo := esp.SYSTIMER.UNIT1_VALUE_LO.Get()
 	nowHi := esp.SYSTIMER.UNIT1_VALUE_HI.Get()
+	println("SYST: Current time: HI=", nowHi, "LO=", nowLo)
+
 	tgtLo := nowLo + periodTicks
 	tgtHi := nowHi
 	if tgtLo < nowLo {
 		tgtHi++
 	}
+	println("SYST: Setting TARGET0: HI=", tgtHi, "LO=", tgtLo, "(period=", periodTicks, ")")
+
 	esp.SYSTIMER.SetTARGET0_HI_TIMER_TARGET0_HI(tgtHi & 0xFFFFF)
 	esp.SYSTIMER.SetTARGET0_LO(tgtLo)
 	esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1)
+
+	println("SYST: TARGET0 programmed and loaded")
 
 	// Clear any pending status and enable SYSTIMER interrupt bit
 	esp.SYSTIMER.INT_CLR.Set(1 << 0)
@@ -490,9 +503,14 @@ func initSystimerTick() {
 	esp.SYSTIMER.INT_CLR.Set(1 << 0)
 	println("SYST: Cleared pending INT")
 
-	// Arm periodic alarm (this starts the timer)
+	// Arm TARGET0 comparator (this enables interrupt generation)
+	println("SYST: About to enable TARGET0 (WORK_EN=1)...")
 	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(1)
-	println("SYST: WORK_EN set, timer armed")
+	println("SYST: TARGET0 enabled (WORK_EN=1)")
+
+	// Verify CONF register
+	confVal := esp.SYSTIMER.CONF.Get()
+	println("SYST: CONF after WORK_EN:", confVal)
 
 	// Verify interrupts are still disabled before Restore
 	psBeforeRestore := device.AsmFull("rsr.ps {}", nil)
@@ -574,21 +592,54 @@ func initSystimerTick() {
 
 	// Step 2: Start timer briefly, count interrupts
 	println("SYST: Starting timer for a short time...")
+
+	// CRITICAL FIX: Disable interrupts BEFORE starting timer!
+	println("SYST: Disabling IRQs before timer start...")
+	interrupt.SetPSIntLevel(15)
+	println("SYST: IRQs disabled (INTLEVEL=15)")
+
+	println("SYST: About to clear INT_CLR...")
 	esp.SYSTIMER.INT_CLR.Set(1 << 0)
+	println("SYST: Cleared INT_CLR")
+
+	println("SYST: About to start timer (WORK_EN=1)...")
 	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(1)
+	println("SYST: Timer started!")
+
+	println("SYST: Clearing INT_CLR after timer start...")
+	esp.SYSTIMER.INT_CLR.Set(1 << 0)
+	println("SYST: Cleared")
+
+	// NOW enable interrupts - let a few fire
+	println("SYST: Re-enabling IRQs (INTLEVEL=0)...")
+	interrupt.SetPSIntLevel(0)
+	println("SYST: IRQs enabled!")
 
 	// Wait a tiny bit (let a few interrupts fire)
+	println("SYST: Starting nop loop...")
 	for i := 0; i < 100; i++ {
 		device.Asm("nop")
 	}
+	println("SYST: Finished nop loop")
 
 	// Stop timer immediately
+	println("SYST: About to disable IRQs again...")
 	interrupt.SetPSIntLevel(15)
-	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(0)
-	esp.SYSTIMER.INT_CLR.Set(1 << 0)
-	interrupt.SetPSIntLevel(0)
+	println("SYST: IRQs disabled")
 
-	println("SYST: Timer stopped!")
+	println("SYST: About to stop timer...")
+	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(0)
+	println("SYST: Timer stopped")
+
+	println("SYST: About to clear INT_CLR again...")
+	esp.SYSTIMER.INT_CLR.Set(1 << 0)
+	println("SYST: Cleared INT_CLR")
+
+	println("SYST: About to restore IRQs...")
+	interrupt.SetPSIntLevel(0)
+	println("SYST: IRQs restored")
+
+	println("SYST: Timer test completed!")
 	println("SYST: ASM ISR counter after:", isrCallCount[0])
 
 	// Check results
@@ -606,6 +657,26 @@ func initSystimerTick() {
 		ien := device.AsmFull("rsr.intenable {}", nil)
 		ist := device.AsmFull("rsr.interrupt {}", nil)
 		println("  INTENABLE:", uint32(uintptr(ien)), "INTERRUPT:", uint32(uintptr(ist)))
+
+		// Detailed SYSTIMER diagnostics
+		println("\nDETAILED SYSTIMER STATE:")
+		println("  CONF:", esp.SYSTIMER.CONF.Get())
+		println("  TARGET0_CONF:", esp.SYSTIMER.TARGET0_CONF.Get())
+		println("  TARGET0_LO:", esp.SYSTIMER.TARGET0_LO.Get())
+		println("  TARGET0_HI:", esp.SYSTIMER.TARGET0_HI.Get())
+
+		// Read current timer value
+		esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
+		for esp.SYSTIMER.GetUNIT1_OP_TIMER_UNIT1_VALUE_VALID() == 0 {
+		}
+		currentLo := esp.SYSTIMER.UNIT1_VALUE_LO.Get()
+		currentHi := esp.SYSTIMER.UNIT1_VALUE_HI.Get()
+		println("  UNIT1_VALUE_LO:", currentLo)
+		println("  UNIT1_VALUE_HI:", currentHi)
+
+		// Check Interrupt Matrix
+		actualMap := esp.INTERRUPT_CORE0.GetSYSTIMER_TARGET0_INT_MAP()
+		println("  Interrupt Matrix mapping:", actualMap)
 	}
 }
 
