@@ -17,6 +17,9 @@ MEMORY
  */
 ENTRY(call_start_cpu0)
 
+/* Define _vector_base BEFORE the section so TinyGo can see it */
+_vector_base = 0x40374000;
+
 SECTIONS
 {
     /* Vectors: VMA in IRAM, LMA in Flash (copied by call_start_cpu0)
@@ -25,9 +28,8 @@ SECTIONS
      * VMA = Virtual address (0x40374000 IRAM) for call0 relocations
      * LMA = Load address (Flash DROM) where esptool places it
      */
-    .vectors 0x40374000 : ALIGN(0x400)
+    .vectors _vector_base : ALIGN(0x400)
     {
-        _vector_base = ABSOLUTE(.);
         _vectors_flash_start = LOADADDR(.vectors);
 
         /* ESP32-S3 Call0 ABI Vector Table Layout (from Xtensa ISA)
@@ -88,7 +90,7 @@ SECTIONS
         
         /* Mark end of vectors section */
         . = ALIGN(16);
-        _vectors_end = ABSOLUTE(.);
+        _vectors_end = .;
         _vectors_flash_end = _vectors_flash_start + SIZEOF(.vectors);
     } >IRAM AT>DROM
 
@@ -103,7 +105,7 @@ SECTIONS
     .text : ALIGN(4)
     {
         /* Mark start of .text section for diagnostics */
-        _text_start = ABSOLUTE(.);
+        _text_start = .;
         
         /* Dispatcher and low-level ISR code (moved from .vectors, ESP-IDF pattern)
          * These must be in IRAM for interrupt handling but are not part of vector table */
@@ -151,10 +153,10 @@ SECTIONS
      */
     .data : ALIGN(4)
     {
-        _sdata = ABSOLUTE(.);
+        _sdata = .;
         *(.data)
         *(.data.*)
-        _edata = ABSOLUTE(.);
+        _edata = .;
     } >DRAM
 
     /* Check that the boot ROM stack does not overlap with the
@@ -170,11 +172,11 @@ SECTIONS
     .bss (NOLOAD) : ALIGN(4)
     {
         . = ALIGN (4);
-        _sbss = ABSOLUTE(.);
+        _sbss = .;
         *(.bss)
         *(.bss.*)
         . = ALIGN (4);
-        _ebss = ABSOLUTE(.);
+        _ebss = .;
     } >DRAM
     
     /* CRITICAL: Verify .bss section is within valid DRAM range

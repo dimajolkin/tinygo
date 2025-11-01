@@ -15,10 +15,6 @@
 .extern _frxt_int_handlers
 .extern handleInterrupt
 .extern handleException
-.extern VectorEntryCount
-.extern IsrCount
-.extern IsrCountBeforeGo
-.extern IsrCountAfterGo
 
 /*
  * _frxt_int_enter - Вход в обработчик прерывания
@@ -181,25 +177,8 @@ _xt_level1_int_handler_entry:
     wsr.ps  a0                              /* use dot notation */
     rsync
     
-    /* DEBUG: Increment IsrCountBeforeGo BEFORE calling handleInterrupt */
-    movi    a2, IsrCountBeforeGo
-    l32i    a3, a2, 0
-    addi    a3, a3, 1
-    s32i    a3, a2, 0
-    
     /* Call Go interrupt handler */
     call0   handleInterrupt
-    
-    /* DEBUG: Increment IsrCountAfterGo AFTER returning from handleInterrupt */
-    movi    a2, IsrCountAfterGo
-    l32i    a3, a2, 0
-    addi    a3, a3, 1
-    s32i    a3, a2, 0
-    
-    /* DEBUG: Mark return from handleInterrupt (3 nops) */
-    nop
-    nop
-    nop
     
     /* Call RTOS interrupt exit hook */
     call0   _frxt_int_exit

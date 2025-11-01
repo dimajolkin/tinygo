@@ -7,51 +7,229 @@ import (
 	"errors"
 )
 
-// readINTENABLE returns current CPU interrupt enable mask.
-func readINTENABLE() uint32 {
-	v := device.AsmFull("rsr.intenable {}", nil)
-	return uint32(v)
+// State represents the previous global interrupt state (PS register on Xtensa).
+type State uintptr
+
+// Disable disables all interrupts and returns the previous interrupt state. It
+// can be used in a critical section like this:
+//
+//	state := interrupt.Disable()
+//	// critical section
+//	interrupt.Restore(state)
+//
+// Critical sections can be nested. Make sure to call Restore in the same order
+// as you called Disable (this happens naturally with the pattern above).
+func Disable() (state State) {
+	// Read current PS register
+	ps := device.AsmFull("rsr.ps {}", nil)
+
+	// Set INTLEVEL=15 (mask all interrupts)
+	newPS := (ps &^ 0x0F) | 15
+	device.AsmFull("wsr.ps {v}", map[string]interface{}{
+		"v": newPS,
+	})
+	device.AsmFull("rsync", nil)
+
+	return State(ps)
 }
 
-// writeINTENABLE writes CPU interrupt enable mask and rsyncs.
-func writeINTENABLE(mask uint32) {
-	device.AsmFull("wsr {v}, INTENABLE", map[string]interface{}{"v": uintptr(mask)})
+// Restore restores interrupts to what they were before. Give the previous state
+// returned by Disable as a parameter. If interrupts were disabled before
+// calling Disable, this will not re-enable interrupts, allowing for nested
+// critical sections.
+func Restore(state State) {
+	device.AsmFull("wsr.ps {v}", map[string]interface{}{
+		"v": uintptr(state),
+	})
 	device.AsmFull("rsync", nil)
 }
 
-// Enable enables this interrupt for ESP32-S3.
-// For ESP32-S3, we enable interrupts globally at the Xtensa level.
+// In returns whether the system is currently in an interrupt.
+// On Xtensa, we check if PS.EXCM bit is set (exception mode).
+func In() bool {
+	ps := device.AsmFull("rsr.ps {}", nil)
+	// EXCM is bit 4 of PS register
+	return (uintptr(ps) & (1 << 4)) != 0
+}
+
+// Adding pseudo function calls that is replaced by the compiler with the actual
+// functions registered through interrupt.New.
+//
+//go:linkname callHandlers runtime/interrupt.callHandlers
+func callHandlers(num int)
+
+// handleInterrupt - главный диспетчер прерываний для ESP32-S3
+// Вызывается из ассемблерного кода _xt_level1_int_handler_entry
+//
+//export handleInterrupt
+func handleInterrupt() {
+	// Read INTERRUPT register to see which CPU interrupt line triggered
+	interruptReg := device.AsmFull("rsr.interrupt {}", nil)
+	interruptMask := uint32(uintptr(interruptReg))
+
+	// Find which interrupt line is active
+	// ESP32-S3 has 32 interrupt lines (0-31)
+	for i := uint32(0); i < 32; i++ {
+		if interruptMask&(1<<i) != 0 {
+			// Clear this CPU interrupt (write-1-to-clear via INTCLEAR register)
+			device.AsmFull("wsr.intclear {v}", map[string]interface{}{
+				"v": uintptr(1 << i),
+			})
+			device.AsmFull("rsync", nil)
+			
+			// Call registered handler for this interrupt line
+			callHandler(int(i))
+			break // Handle only one interrupt at a time
+		}
+	}
+}
+
+//export handleException
+func handleException(exccause, excvaddr, epc uint32) {
+	// Handle fatal exceptions
+	// This should never return
+	print("FATAL EXCEPTION!\n")
+	print("EXCCAUSE: ")
+	printHex32(exccause)
+	print("\nEXCVADDR: ")
+	printHex32(excvaddr)
+	print("\nEPC: ")
+	printHex32(epc)
+	print("\n")
+	
+	// Halt forever
+	for {
+		device.Asm("waiti 0")
+	}
+}
+
+func printHex32(val uint32) {
+	const hexChars = "0123456789abcdef"
+	print("0x")
+	for i := 7; i >= 0; i-- {
+		nibble := byte((val >> (uint(i) * 4)) & 0xF)
+		if nibble < 10 {
+			print(string('0' + nibble))
+		} else {
+			print(string('a' + (nibble - 10)))
+		}
+	}
+}
+
+//go:inline
+func callHandler(n int) {
+	// ESP32-S3 supports 32 CPU interrupt lines
+	// We need to dispatch to the appropriate handler
+	switch n {
+	case 0:
+		callHandlers(0)
+	case 1:
+		callHandlers(1)
+	case 2:
+		callHandlers(2)
+	case 3:
+		callHandlers(3)
+	case 4:
+		callHandlers(4)
+	case 5:
+		callHandlers(5)
+	case 6:
+		callHandlers(6)
+	case 7:
+		callHandlers(7)
+	case 8:
+		callHandlers(8)
+	case 9:
+		callHandlers(9)
+	case 10:
+		callHandlers(10)
+	case 11:
+		callHandlers(11)
+	case 12:
+		callHandlers(12)
+	case 13:
+		callHandlers(13)
+	case 14:
+		callHandlers(14)
+	case 15:
+		callHandlers(15)
+	case 16:
+		callHandlers(16)
+	case 17:
+		callHandlers(17)
+	case 18:
+		callHandlers(18)
+	case 19:
+		callHandlers(19)
+	case 20:
+		callHandlers(20)
+	case 21:
+		callHandlers(21)
+	case 22:
+		callHandlers(22)
+	case 23:
+		callHandlers(23)
+	case 24:
+		callHandlers(24)
+	case 25:
+		callHandlers(25)
+	case 26:
+		callHandlers(26)
+	case 27:
+		callHandlers(27)
+	case 28:
+		callHandlers(28)
+	case 29:
+		callHandlers(29)
+	case 30:
+		callHandlers(30)
+	case 31:
+		callHandlers(31)
+	}
+}
+
+// Enable enables this interrupt. Right after calling this function, the
+// interrupt may be invoked if it was already pending.
 func (i Interrupt) Enable() error {
-	if i.num < 1 || i.num > 31 {
-		return errors.New("interrupt for ESP32-S3 must be in range of 1 through 31")
+	if i.num < 0 || i.num > 31 {
+		return errors.New("interrupt number out of range [0-31]")
 	}
 
-	// Disable interrupts temporarily to avoid race conditions
-	mask := Disable()
-	defer Restore(mask)
-
-	// Enable this CPU interrupt line in INTENABLE
-	m := readINTENABLE()
-	m |= (1 << uint(i.num))
-	writeINTENABLE(m)
+	// Set INTENABLE bit for this interrupt line
+	mask := device.AsmFull("rsr.intenable {}", nil)
+	mask |= (1 << uint(i.num))
+	device.AsmFull("wsr.intenable {v}", map[string]interface{}{
+		"v": mask,
+	})
+	device.AsmFull("rsync", nil)
 
 	return nil
 }
 
 // Disable disables this interrupt.
-func (i Interrupt) Disable() {
-	if i.num < 1 || i.num > 31 {
-		return
+func (i Interrupt) Disable() error {
+	if i.num < 0 || i.num > 31 {
+		return errors.New("interrupt number out of range [0-31]")
 	}
-	// Clear this CPU interrupt line in INTENABLE
-	m := readINTENABLE()
-	m &^= (1 << uint(i.num))
-	writeINTENABLE(m)
+
+	// Clear INTENABLE bit for this interrupt line
+	mask := device.AsmFull("rsr.intenable {}", nil)
+	mask &^= (1 << uint(i.num))
+	device.AsmFull("wsr.intenable {v}", map[string]interface{}{
+		"v": mask,
+	})
+	device.AsmFull("rsync", nil)
+
+	return nil
 }
 
 // SetPriority sets the interrupt priority for this interrupt.
-// For Xtensa, priority is managed through interrupt levels.
-func (i Interrupt) SetPriority(priority uint8) {
-	// Priority management is done through INTLEVEL in PS register
-	// This is a placeholder for future implementation
+// A lower number means a higher priority.
+// Xtensa ESP32-S3 supports interrupt levels 1-7.
+func (i Interrupt) SetPriority(priority uint8) error {
+	// On Xtensa, priority is controlled by interrupt level (1-7)
+	// and by CPU INTLEVEL in PS register.
+	// This is a placeholder - actual implementation would need
+	// to configure interrupt routing through Interrupt Matrix.
+	return nil
 }

@@ -29,19 +29,48 @@ import (
 	"unsafe"
 )
 
-// External symbols from linker script and ASM (esp32s3.ld, xtensa_vectors_esp32s3.S)
+var systimerIRQCount = 0
+
+// External symbols from linker script (esp32s3.ld)
+// These are defined in the linker script and point to specific memory addresses
 //
 //go:extern _vector_base
-var vectorBase [0]byte
+var vectorBaseSymbol [0]byte
 
 //go:extern _vectors_end
-var vectorsEnd [0]byte
+var vectorsEndSymbol [0]byte
 
 //go:extern _text_start
-var textStart [0]byte
+var textStartSymbol [0]byte
 
 //go:extern _UserExceptionVector
-var userExceptionVector [0]byte
+var userExceptionVectorSymbol [0]byte
+
+// Helper functions to get addresses from linker symbols
+// These are needed because direct access to symbols doesn't work reliably in TinyGo
+func getVectorBase() uintptr {
+	return uintptr(unsafe.Pointer(&vectorBaseSymbol))
+}
+
+func getVectorsEnd() uintptr {
+	return uintptr(unsafe.Pointer(&vectorsEndSymbol))
+}
+
+func getTextStart() uintptr {
+	return uintptr(unsafe.Pointer(&textStartSymbol))
+}
+
+func getUserExceptionVector() uintptr {
+	return uintptr(unsafe.Pointer(&userExceptionVectorSymbol))
+}
+
+// Compatibility aliases for test code
+var (
+	vectorBase          = getVectorBase
+	vectorsEnd          = getVectorsEnd
+	textStart           = getTextStart
+	userExceptionVector = getUserExceptionVector
+)
 
 // Debug functions sorted by GPIO number (ascending: 4→5→6→7)
 func debugGPIO(n int) {
@@ -146,70 +175,18 @@ func main() {
 
 	// Validate vector table layout (ESP-IDF compliance)
 	initTimer()
-	//initSystimerTick()
-
 	for i := 0; i < 10000; i++ {
 		print(".")
 	}
 	print("\n")
 
-	testPrintSubsystem()
-	testMemorySubsystems()
+	// ДИАГНОСТИКА: проверить что векторы действительно в IRAM
+	checkVectorsInMemory()
 
-	abort()
-	// Configure GPIO41 as debug output (toggled by SYSTIMER ISR)
-	//initDebugPin41()
+	// Initialize SYSTIMER for system tick
+	initSystimerTick()
 
-	// Prepare SYSTIMER and enable interrupts
-	prepareInterruptMonitoring()
-	setPSIntLevel(0) // Enable interrupts!
-
-	// CRITICAL: Disable interrupts before printing results!
-	// println is NOT reentrant and crashes if interrupted
-	old := interrupt.Disable()
-
-	// Monitor background SYSTIMER interrupts
-	finalCount := monitorBackgroundInterrupts()
-
-	if finalCount == 0 {
-		println("FATAL: No ISR fired!")
-
-		// Run all diagnostic tests in order
-		//testDirectCallToHandleInterrupt()
-		//testSoftwareInterrupt()
-		//testPSRegisterAndWAITI()
-		testDeepDiagnostics()
-		testGPIOHardwareInterrupt()
-
-		// Dump all diagnostic information
-		dumpDiagnosticInfo()
-
-		println("\nHalting...")
-		for {
-		}
-	}
-
-	println("SUCCESS! ISR is working! GPIO41 should be blinking.")
-	println(">>> Re-enabling interrupts for background loop...")
-
-	interrupt.Restore(old) // Re-enable interrupts
-
-	// Background: reflect ISR tick counter to GPIO41 without touching ISR
-	var last uint32
-	for {
-		if esp.IsrCount != last {
-			last = esp.IsrCount
-			if gpio41State == 0 {
-				debugPin.High()
-				gpio41State = 1
-			} else {
-				debugPin.Low()
-				gpio41State = 0
-			}
-		}
-	}
-
-	// Now use standard run() which will call initHeap() again but it should be safe
+	// Call the standard runtime
 	run()
 
 	// Fallback: if main ever returns, hang the CPU.
@@ -361,6 +338,91 @@ func abort() {
 	}
 }
 
+// checkVectorsInMemory проверяет, что векторы действительно скопированы в IRAM
+// и показывает первые 64 байта векторной таблицы
+func checkVectorsInMemory() {
+	println("\n=== VECTOR TABLE MEMORY CHECK ===")
+
+	// ТЕСТ: Сравнить с _sbss и _ebss - они ТОЧНО работают!
+	sbssAddr := uintptr(unsafe.Pointer(&_sbss))
+	ebssAddr := uintptr(unsafe.Pointer(&_ebss))
+	println("_sbss address (decimal):", uint32(sbssAddr))
+	println("_ebss address (decimal):", uint32(ebssAddr))
+
+	// Получить адрес _vector_base (через функцию-обертку)
+	vectorBaseAddr := getVectorBase()
+	println("_vector_base address (decimal):", uint32(vectorBaseAddr))
+
+	// Получить текущий VECBASE из регистра
+	vecbase := device.AsmFull("rsr.vecbase {}", nil)
+	println("VECBASE register (decimal):", uint32(uintptr(vecbase)))
+
+	// Выводим в hex формате используя printptr()
+	print("_sbss hex: ")
+	printptr(sbssAddr)
+	println()
+	print("_ebss hex: ")
+	printptr(ebssAddr)
+	println()
+	print("_vector_base hex: ")
+	printptr(vectorBaseAddr)
+	println()
+	print("VECBASE hex: ")
+	printptr(uintptr(vecbase))
+	println()
+
+	// Проверить что адреса совпадают
+	if vectorBaseAddr == uintptr(vecbase) {
+		println("✓ VECBASE correctly points to _vector_base")
+	} else {
+		println("✗ ERROR: VECBASE mismatch!")
+	}
+
+	// Прочитать ключевые векторы (показываем только non-zero для краткости)
+	println("\nVector table contents (non-zero entries only):")
+	ptr := (*[32]uint32)(unsafe.Pointer(vectorBaseAddr))
+	nonZeroCount := 0
+	for i := 0; i < 32; i++ {
+		val := ptr[i]
+		if val != 0 && val != 0xFFFFFFFF {
+			offset := i * 4
+			println("  Offset", offset, "bytes: value =", val)
+			nonZeroCount++
+		}
+	}
+	println("Total non-zero words:", nonZeroCount, "/ 32")
+
+	// Декодировать какие векторы присутствуют (по смещениям)
+	println("\nVector presence analysis:")
+	if ptr[0] != 0 {
+		println("  ✓ UserExceptionVector at +0x00")
+	}
+	if ptr[8] != 0 { // 0x20 / 4 = 8
+		println("  ✓ DoubleExceptionVector at +0x20")
+	}
+	if ptr[16] != 0 { // 0x40 / 4 = 16
+		println("  ✓ KernelExceptionVector at +0x40")
+	}
+	if ptr[24] != 0 { // 0x60 / 4 = 24
+		println("  ✓ NMIExceptionVector at +0x60")
+	}
+
+	// Проверить что UserExceptionVector имеет правильную инструкцию
+	// Первая инструкция должна быть примерно: wsr a0, EXCSAVE_1 (0x00Dxxx)
+	firstInstr := ptr[0]
+	if (firstInstr & 0x00FF00) == 0x00D100 {
+		println("✓ First instruction looks like 'wsr a0, EXCSAVE_1'")
+	} else {
+		println("✗ First instruction doesn't match expected pattern")
+		println("  Expected: 0x00D1xxxx (wsr a0, EXCSAVE_1)")
+		print("  Got:      ")
+		printptr(uintptr(firstInstr))
+		println()
+	}
+
+	println("=== END MEMORY CHECK ===\n")
+}
+
 //go:extern _vector_table
 var _vector_table [0]uintptr
 
@@ -390,57 +452,44 @@ func setPSIntLevel(level int) {
 // and routes it to a CPU interrupt channel via the Interrupt Matrix.
 func initSystimerTick() {
 	const systimerClockHz = 80_000_000 // assumed SYSTIMER clock
-	const tickPeriodNs = 1_000_000     // 1ms (для быстрого тестирования)
-	const cpuInterruptForSystimer = 23 // CPU-level interrupt line (avoid pending 20)
-	const debugSkipISRRegistration = false
+	const tickPeriodNs = 1_000_000     // 1ms
+	const cpuInterruptForSystimer = 23 // CPU-level interrupt line
 
 	// Compute period in timer ticks: ticks = Freq * period
 	periodTicks := uint32((systimerClockHz * tickPeriodNs) / 1_000_000_000)
 	if periodTicks == 0 {
 		periodTicks = 1
 	}
-	println("SYST step1 periodTicks=", periodTicks)
 
-	// Temporarily block interrupts during configuration (safe way)
+	// Temporarily block interrupts during configuration
 	old := interrupt.Disable()
-	println("SYST step2 mask IRQs (Disable)")
 
 	// Map SYSTIMER TARGET0 to selected CPU interrupt channel on core0
 	esp.INTERRUPT_CORE0.SetSYSTIMER_TARGET0_INT_MAP(cpuInterruptForSystimer)
-	println("SYST step3 map cpuInt=", cpuInterruptForSystimer)
 
 	// Ensure SYSTIMER clocks enabled
 	esp.SYSTIMER.SetCONF_SYSTIMER_CLK_FO(1)
 	esp.SYSTIMER.CONF.Set(esp.SYSTIMER.CONF.Get() | esp.SYSTIMER_CONF_CLK_EN)
 	esp.SYSTIMER.SetCONF_TIMER_UNIT0_WORK_EN(1)
 	esp.SYSTIMER.SetCONF_TIMER_UNIT1_WORK_EN(1)
-	println("SYST step4 clocks on")
 
 	// Configure periodic mode on UNIT1 for TARGET0 and set period
 	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_TIMER_UNIT_SEL(1)
 	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD_MODE(1)
 	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD(periodTicks)
-	// Load comparator configuration (no arm yet)
 	esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1)
-	println("SYST step5 cfg period + comp load")
 
-	println("SYST step8 before isr registration")
-	if !debugSkipISRRegistration {
-		println("SYST step8.1 calling interrupt.New")
-		_ = interrupt.New(cpuInterruptForSystimer, systimerHandleInterrupt)
-		println("SYST step8.2 after interrupt.New (Enable deferred)")
-	} else {
-		println("SYST step8 skipped isr registration (debug)")
-	}
+	// Register interrupt handler
+	println("SYST: Registering handler...")
+	_ = interrupt.New(cpuInterruptForSystimer, systimerHandleInterrupt)
+	println("SYST: Handler registered")
 
-	// Program first shot: latch UNIT1, wait valid, set TARGET0 = now + period, load, enable INT
+	// Program first shot: latch UNIT1, wait valid, set TARGET0 = now + period
 	esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
 	for esp.SYSTIMER.GetUNIT1_OP_TIMER_UNIT1_VALUE_VALID() == 0 {
 	}
-	// read latched UNIT1 now (low then hi)
 	nowLo := esp.SYSTIMER.UNIT1_VALUE_LO.Get()
 	nowHi := esp.SYSTIMER.UNIT1_VALUE_HI.Get()
-	// compute target = now + periodTicks
 	tgtLo := nowLo + periodTicks
 	tgtHi := nowHi
 	if tgtLo < nowLo {
@@ -449,90 +498,111 @@ func initSystimerTick() {
 	esp.SYSTIMER.SetTARGET0_HI_TIMER_TARGET0_HI(tgtHi & 0xFFFFF)
 	esp.SYSTIMER.SetTARGET0_LO(tgtLo)
 	esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1)
+
 	// Clear any pending status and enable SYSTIMER interrupt bit
 	esp.SYSTIMER.INT_CLR.Set(1 << 0)
 	esp.SYSTIMER.INT_ENA.SetBits(1 << 0)
-	println("SYST step9 armed first shot: nowHI=", nowHi, " nowLO=", nowLo, " tgtHI=", tgtHi, " tgtLO=", tgtLo)
+	println("SYST: Peripheral INT enabled")
 
 	// Arm periodic alarm
 	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(1)
-	println("SYST after WORK_EN: T0CONF=", esp.SYSTIMER.TARGET0_CONF.Get())
-	println("SYST step10 work en")
+	println("SYST: WORK_EN set")
 
-	// Unmask interrupts (log VECBASE/masks/status before)
-	vec := device.AsmFull("rsr.vecbase {}", nil)
-	ps := device.AsmFull("rsr.ps {}", nil)
-	ien := device.AsmFull("rsr.intenable {}", nil)
-	ist := device.AsmFull("rsr.interrupt {}", nil)
-	println("SYST pre-unmask: VECBASE=", uint32(uintptr(vec)),
-		" MAP=", esp.INTERRUPT_CORE0.GetSYSTIMER_TARGET0_INT_MAP(),
-		" PS=", uint32(uintptr(ps)&0xFFFF),
-		" INTENABLE=", uint32(uintptr(ien)),
-		" INTERRUPT=", uint32(uintptr(ist)))
-	// Mask CPU interrupts to 0 before restore to avoid immediate IRQ burst
+	// Mask CPU interrupts temporarily
 	device.AsmFull("wsr.intenable {v}", map[string]interface{}{"v": uintptr(0)})
 	device.AsmFull("rsync", nil)
-	println("SYST step11 about to Restore (INTENABLE=0)")
 	interrupt.Restore(old)
-	println("SYST step11 restored, PS=", uint32(uintptr(device.AsmFull("rsr.ps {}", nil))&0xFFFF))
+	println("SYST: Restored old state")
 
-	// Now enable CPU interrupt line for SYSTIMER
-	if !debugSkipISRRegistration {
-		println("SYST step12 enabling IRQ line")
-		// INTLEVEL=15 (mask all) while enabling line and clearing pending
-		psTmp := device.AsmFull("rsr.ps {}", nil)
-		psTmp &^= 0x0F
-		psTmp |= 15
-		device.AsmFull("wsr.ps {v}", map[string]interface{}{"v": psTmp})
-		device.AsmFull("rsync", nil)
+	// Enable CPU interrupt line for SYSTIMER with INTLEVEL=15 temporarily
+	psTmp := device.AsmFull("rsr.ps {}", nil)
+	psTmp &^= 0x0F
+	psTmp |= 15
+	device.AsmFull("wsr.ps {v}", map[string]interface{}{"v": psTmp})
+	device.AsmFull("rsync", nil)
+	println("SYST: INTLEVEL=15")
 
-		// Clear peripheral pending if any
-		if (esp.SYSTIMER.INT_ST.Get() & 1) != 0 {
-			esp.SYSTIMER.INT_CLR.Set(1 << 0)
-			println("SYST step12 cleared INT_ST")
-		}
-
-		// Set INTENABLE bit for selected CPU interrupt line
-		ien := device.AsmFull("rsr.intenable {}", nil)
-		ien |= (1 << cpuInterruptForSystimer)
-		device.AsmFull("wsr.intenable {v}", map[string]interface{}{"v": ien})
-		device.AsmFull("rsync", nil)
-		ien2 := device.AsmFull("rsr.intenable {}", nil)
-		intr2 := device.AsmFull("rsr.interrupt {}", nil)
-		println("SYST step12 INTENABLE=", uint32(uintptr(ien2)), " INTERRUPT=", uint32(uintptr(intr2)))
-
-		// Rearm comparator relative to current UNIT1 time (avoid past target)
-		esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
-		for esp.SYSTIMER.GetUNIT1_OP_TIMER_UNIT1_VALUE_VALID() == 0 {
-		}
-		rNowLo := esp.SYSTIMER.UNIT1_VALUE_LO.Get()
-		rNowHi := esp.SYSTIMER.UNIT1_VALUE_HI.Get()
-		rTgtLo := rNowLo + periodTicks
-		rTgtHi := rNowHi
-		if rTgtLo < rNowLo {
-			rTgtHi++
-		}
-		esp.SYSTIMER.SetTARGET0_HI_TIMER_TARGET0_HI(rTgtHi & 0xFFFFF)
-		esp.SYSTIMER.SetTARGET0_LO(rTgtLo)
-		esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1)
-		println("SYST step12 rearm: nowHI=", rNowHi, " nowLO=", rNowLo, " tgtHI=", rTgtHi, " tgtLO=", rTgtLo)
-
-		// Drop to INTLEVEL=1 first, then 0 (avoid immediate burst)
-		ps1 := device.AsmFull("rsr.ps {}", nil)
-		ps1 &^= 0x0F
-		ps1 |= 1
-		device.AsmFull("wsr.ps {v}", map[string]interface{}{"v": ps1})
-		device.AsmFull("rsync", nil)
-		setPSIntLevel(0)
+	// Clear peripheral pending if any
+	if (esp.SYSTIMER.INT_ST.Get() & 1) != 0 {
+		esp.SYSTIMER.INT_CLR.Set(1 << 0)
+		println("SYST: Cleared pending INT_ST")
 	}
 
-	// Minimal log
-	println("SYSTIMER tick armed: periodTicks=", periodTicks)
+	// Set INTENABLE bit for selected CPU interrupt line
+	ien := device.AsmFull("rsr.intenable {}", nil)
+	ien |= (1 << cpuInterruptForSystimer)
+	device.AsmFull("wsr.intenable {v}", map[string]interface{}{"v": ien})
+	device.AsmFull("rsync", nil)
+	println("SYST: INTENABLE bit 23 set")
+
+	// Rearm comparator relative to current time
+	esp.SYSTIMER.SetUNIT1_OP_TIMER_UNIT1_UPDATE(1)
+	for esp.SYSTIMER.GetUNIT1_OP_TIMER_UNIT1_VALUE_VALID() == 0 {
+	}
+	rNowLo := esp.SYSTIMER.UNIT1_VALUE_LO.Get()
+	rNowHi := esp.SYSTIMER.UNIT1_VALUE_HI.Get()
+	rTgtLo := rNowLo + periodTicks
+	rTgtHi := rNowHi
+	if rTgtLo < rNowLo {
+		rTgtHi++
+	}
+	esp.SYSTIMER.SetTARGET0_HI_TIMER_TARGET0_HI(rTgtHi & 0xFFFFF)
+	esp.SYSTIMER.SetTARGET0_LO(rTgtLo)
+	esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1)
+	println("SYST: Rearmed comparator")
+
+	// Drop to INTLEVEL=0 (enable interrupts)
+	println("SYST: About to enable interrupts (INTLEVEL=0)...")
+	setPSIntLevel(0)
+	println("SYST: Interrupts enabled!")
+
+	// Wait 10ms for at least one interrupt to fire
+	println("SYST: Waiting for first interrupt...")
+	startCount := systimerIRQCount
+
+	// TEST: Temporarily disable interrupts to see if loop completes
+	println("SYST: Test - disabling IRQs temporarily...")
+	setPSIntLevel(15)
+
+	// Simple busy wait
+	println("SYST: Starting busy wait...")
+	for i := 0; i < 1000000; i++ {
+		device.Asm("nop")
+	}
+	println("SYST: Busy wait completed!")
+
+	// Re-enable interrupts
+	println("SYST: Re-enabling IRQs...")
+	setPSIntLevel(0)
+
+	// Now wait for interrupt
+	println("SYST: Waiting with IRQs enabled...")
+	for i := 0; i < 1000000; i++ {
+		device.Asm("nop")
+		if systimerIRQCount > startCount {
+			println("SYST: Got interrupt in loop!")
+			break
+		}
+	}
+
+	// Check if interrupt fired
+	println("SYST: After wait, count=", systimerIRQCount)
+	if systimerIRQCount > startCount {
+		println("✓ SYSTIMER interrupts working! Count:", systimerIRQCount)
+	} else {
+		println("✗ ERROR: No SYSTIMER interrupts received!")
+		println("  INT_ST:", esp.SYSTIMER.INT_ST.Get(), "INT_ENA:", esp.SYSTIMER.INT_ENA.Get())
+		ien := device.AsmFull("rsr.intenable {}", nil)
+		ist := device.AsmFull("rsr.interrupt {}", nil)
+		println("  INTENABLE:", uint32(uintptr(ien)), "INTERRUPT:", uint32(uintptr(ist)))
+	}
 }
 
-// systimerHandleInterrupt handles SYSTIMER TARGET0 interrupt (10ms tick).
+// systimerHandleInterrupt handles SYSTIMER TARGET0 interrupt (1ms tick).
 func systimerHandleInterrupt(intr interrupt.Interrupt) {
-	// Clear interrupt status only and bump counter. Avoid any non-ISR-safe calls.
+	// CRITICAL: Clear interrupt status FIRST to avoid re-triggering
 	esp.SYSTIMER.INT_CLR.Set(1 << 0)
+
+	// Increment counter (simple, ISR-safe, no print/println!)
 	systimerIRQCount++
 }

@@ -1,3 +1,19 @@
+/*
+ * ESP32-S3 Startup Code with Interrupt Vector Table Initialization
+ * 
+ * This file sets up the CPU and initializes the interrupt vector table
+ * by setting the VECBASE register to point to _vector_base.
+ * 
+ * Vector table layout (defined in xtensa_vectors_esp32s3.S):
+ *   VECBASE + 0x000: Reset vector (not used on ESP32-S3)
+ *   VECBASE + 0x180: User exception vector (Level-1 interrupts)
+ *   VECBASE + 0x1C0: Kernel exception vector
+ *   VECBASE + 0x200: Double exception vector
+ *   VECBASE + 0x240: Level 2-7 interrupt vectors
+ * 
+ * The vectors are placed in IRAM by the linker script (esp32s3.ld)
+ * and do NOT need to be copied at runtime.
+ */
 
 // The following definitions were copied from:
 // esp-idf/components/xtensa/include/xtensa/corebits.h
@@ -49,6 +65,11 @@ call_start_cpu0:
     movi a2, 1
     wsr.cpenable a2
     rsync
+
+    // Set VECBASE to point to interrupt vectors in IRAM
+    // Note: ROM bootloader already copied vectors from flash to IRAM (0x40374000)
+    // We just need to tell the CPU where they are by setting VECBASE register
+    call0 runtime.setVecbaseToVectorBase
 
     // Jump to the runtime start function written in Go.
     call4 main

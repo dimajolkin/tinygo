@@ -15,22 +15,32 @@
 // void runtime.setVecbaseToVectorBase()
 // Sets VECBASE to _vector_base address from linker script
 // IMPORTANT: Disables interrupts during VECBASE change to avoid race conditions
+// 
+// Uses hardcoded address 0x40374000 since TinyGo linker cannot properly
+// resolve //go:extern symbols in assembly literal pools.
+// This address MUST match the linker script: .vectors 0x40374000
 runtime.setVecbaseToVectorBase:
     .align 4
+    
+    // Load _vector_base address (0x40374000 from linker script)
+    movi    a4, 0x4037                  // Upper 16 bits
+    slli    a4, a4, 16                  // Shift left 16 bits
+    movi    a5, 0x4000                  // Lower 16 bits
+    or      a4, a4, a5                  // Combine: a4 = 0x40374000
     
     // Save current PS register
     rsr     a3, PS
     
     // Disable all interrupts (set INTLEVEL=15, keep other bits)
-    movi    a4, ~0x0F                   // Mask to clear INTLEVEL bits
-    and     a4, a3, a4                  // Clear INTLEVEL
+    movi    a2, ~0x0F                   // Mask to clear INTLEVEL bits
+    and     a2, a3, a2                  // Clear INTLEVEL
     movi    a5, 15                      // INTLEVEL = 15 (mask all)
-    or      a4, a4, a5
-    wsr     a4, PS
+    or      a2, a2, a5
+    wsr     a2, PS
     rsync
     
     // Now it's safe to change VECBASE
-    l32r    a2, .Lvecbase_addr          // Load _vector_base address from literal pool
+    mov     a2, a4                      // a2 = 0x40374000
     wsr     a2, VECBASE                 // VECBASE = a2
     rsync                               // synchronize
     
@@ -39,10 +49,6 @@ runtime.setVecbaseToVectorBase:
     rsync
     
     ret                                 // return (Call0 ABI)
-
-.align 4
-.Lvecbase_addr:
-    .word   _vector_base                // Literal: address of _vector_base
 
 .size runtime.setVecbaseToVectorBase, .-runtime.setVecbaseToVectorBase
 

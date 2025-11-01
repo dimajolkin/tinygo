@@ -103,23 +103,6 @@
 _frxt_int_depth:
     .space 4
 
-.section .bss.VectorEntryCount, "aw", @nobits
-.align 4
-.global VectorEntryCount
-VectorEntryCount:
-    .space 4
-
-.section .bss.IsrCountBeforeGo, "aw", @nobits
-.align 4
-.global IsrCountBeforeGo
-IsrCountBeforeGo:
-    .space 4
-
-.section .bss.IsrCountAfterGo, "aw", @nobits
-.align 4
-.global IsrCountAfterGo
-IsrCountAfterGo:
-    .space 4
 
 /*
  * User Exception Vector (Level-1) - handles all Level-1 interrupts and exceptions
@@ -141,19 +124,12 @@ _UserExceptionVector:
 .align 4
 .type _xt_user_exc,@function
 _xt_user_exc:
-    /* DEBUG: Increment VectorEntryCount to track vector entry */
-    wsr     a2, EXCSAVE_1                   /* save a2 temporarily */
-    movi    a0, VectorEntryCount
-    l32i    a2, a0, 0
-    addi    a2, a2, 1
-    s32i    a2, a0, 0
-    rsr     a2, EXCSAVE_1                   /* restore a2 */
-    rsr     a0, EXCSAVE_1                   /* restore a0 (was saved by vector) */
-    
     /* Check if this is a Level-1 interrupt (EXCCAUSE == 4) */
-    wsr     a0, EXCSAVE_1                   /* save a0 again for exccause read */
-    rsr     a0, EXCCAUSE                    /* read EXCCAUSE */
-    bnei    a0, 4, _xt_unhandled_exception  /* if not level1 interrupt, handle as exception */
+    rsr     a0, EXCSAVE_1                   /* restore a0 from EXCSAVE_1 */
+    wsr     a2, EXCSAVE_1                   /* save a2 temporarily */
+    rsr     a2, EXCCAUSE                    /* read EXCCAUSE into a2 */
+    bnei    a2, 4, _xt_unhandled_exception  /* if not level1 interrupt, handle as exception */
+    rsr     a2, EXCSAVE_1                   /* restore a2 */
     /* Fall through to _xt_lowint1 for interrupts */
 
 /* Low-level level-1 interrupt entry: create stack frame and dispatch */
