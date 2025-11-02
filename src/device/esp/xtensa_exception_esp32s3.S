@@ -147,10 +147,9 @@ _frxt_int_exit:
  * Called from: _xt_lowint1 in xtensa_vectors_esp32s3.S
  */
 _xt_level1_int_handler_entry:
-    /* ULTRA-MINIMAL ISR for diagnosis - only increment counter and clear flags */
+    /* Minimal ISR: increment counter, clear interrupt, return */
     
-    /* Save only a0, a2, a3 (minimal save) */
-    s32i    a0, sp, XT_STK_A0
+    /* Save a2, a3 */
     s32i    a2, sp, XT_STK_A2
     s32i    a3, sp, XT_STK_A3
     
@@ -160,38 +159,24 @@ _xt_level1_int_handler_entry:
     addi    a3, a3, 1
     s32i    a3, a2, 0
     
-    /* Check if count >= 5, stop timer */
-    movi    a2, 5
-    blt     a3, a2, .clear_only
-    
-    /* Stop SYSTIMER */
-    movi    a2, 0x60023000          /* SYSTIMER.CONF */
-    l32i    a3, a2, 0
-    movi    a0, 0xFFFFFFF7          /* ~(1<<3) */
-    and     a3, a3, a0
-    s32i    a3, a2, 0
-    memw
-    
-.clear_only:
-    /* Clear SYSTIMER peripheral flag */
+    /* Clear SYSTIMER interrupt */
     movi    a2, 0x60023010          /* SYSTIMER.INT_CLR */
     movi    a3, 1
     s32i    a3, a2, 0
     memw
     
-    /* Clear CPU interrupt line 23 */
-    movi    a2, 0x800000            /* 1 << 23 */
+    /* Clear CPU interrupt line 1 */
+    movi    a2, 0x2                 /* 1 << 1 */
     wsr.intclear a2
     rsync
     
-    /* Restore registers in reverse order */
+    /* Restore a2, a3 */
     l32i    a3, sp, XT_STK_A3
     l32i    a2, sp, XT_STK_A2
-    l32i    a0, sp, XT_STK_A0
     
-    /* Return from exception - CPU restores PC from EPC1 and PS automatically */
-    rsync
-    rfe
+    /* Return via _xt_user_exit */
+    l32i    a0, sp, XT_STK_EXIT
+    jx      a0
 
 /*
  * _xt_unhandled_exception - Обработчик необработанного исключения

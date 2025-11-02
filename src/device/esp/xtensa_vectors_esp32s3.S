@@ -119,8 +119,10 @@ _UserExceptionVector:
     call0   _xt_user_exc        /* jump to user exception handler */
 .end        literal_prefix
 
+/* Place exception handlers in .iram1.text for proximity to vectors */
+.section .iram1.text, "ax"
+
 /* User exception dispatcher: check if Level-1 interrupt or exception */
-.section .text._xt_user_exc, "ax", @progbits
 .align 4
 .type _xt_user_exc,@function
 _xt_user_exc:
@@ -128,35 +130,30 @@ _xt_user_exc:
     rsr     a0, EXCSAVE_1                   /* restore a0 from EXCSAVE_1 */
     wsr     a2, EXCSAVE_1                   /* save a2 temporarily */
     rsr     a2, EXCCAUSE                    /* read EXCCAUSE into a2 */
-    bnei    a2, 4, _xt_unhandled_exception  /* if not level1 interrupt, handle as exception */
+    bnei    a2, 4, _xt_to_unhandled_exc     /* if not level1 interrupt, jump to trampoline */
     rsr     a2, EXCSAVE_1                   /* restore a2 */
-    /* Fall through to _xt_lowint1 for interrupts */
+    j       _xt_lowint1                     /* EXPLICIT jump to _xt_lowint1! */
+
+/* Trampoline for unhandled exception (must be close for bnei) */
+.align 4
+_xt_to_unhandled_exc:
+    call0   _xt_unhandled_exception         /* long jump to real handler */
 
 /* Low-level level-1 interrupt entry: create stack frame and dispatch */
-.section .text._xt_lowint1, "ax", @progbits
 .align 4
 .global _xt_lowint1
 _xt_lowint1:
-    /* Save minimal context on stack (following ESP-IDF model) */
-    mov     a0, sp                          /* a0 = current sp */
-    addi    sp, sp, -XT_STK_FRMSZ           /* allocate stack frame (112 bytes) */
-    s32i    a0, sp, XT_STK_A1               /* save pre-interrupt SP */
+    /* ABSOLUTE MINIMAL inline ISR - just clear and return! */
+    wsr     a0, EXCSAVE_1                   /* save a0 */
     
-    rsr     a0, PS                          /* save PS */
-    s32i    a0, sp, XT_STK_PS
+    /* Clear CPU interrupt line 1 */
+    movi    a0, 0x2                         /* 1 << 1 */
+    wsr.intclear a0
+    rsync
     
-    rsr     a0, EPC_1                       /* save interruptee's PC from EPC_1 */
-    s32i    a0, sp, XT_STK_PC
-    
-    rsr     a0, EXCSAVE_1                   /* restore original a0 from EXCSAVE_1 */
-    s32i    a0, sp, XT_STK_A0               /* save original a0 */
-    
-    movi    a0, _xt_user_exit               /* save exit point */
-    s32i    a0, sp, XT_STK_EXIT
-    
-    /* Now jump to the main interrupt handler */
-    call0   _xt_level1_int_handler_entry
-    /* never returns here */
+    /* Restore a0 and return */
+    rsr     a0, EXCSAVE_1
+    rfe
 
 .global _xt_user_exit
 _xt_user_exit:

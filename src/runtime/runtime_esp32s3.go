@@ -178,7 +178,7 @@ func main() {
 	initSystimerTick()
 
 	// ДИАГНОСТИКА: проверить что векторы действительно в IRAM
-	checkVectorsInMemory()
+	//checkVectorsInMemory()
 
 	// Initialize SYSTIMER for system tick
 
@@ -629,7 +629,9 @@ func initSystimerTick() {
 	// Source: components/esp_hw_support/port/esp32s3/systimer.c:16
 	const systimerClockHz = 16_000_000 // 16MHz (NOT 80MHz!)
 	const tickPeriodNs = 1_000_000     // 1ms (same as CONFIG_FREERTOS_HZ=1000)
-	const cpuInterruptForSystimer = 23 // CPU-level interrupt line (arbitrary choice)
+	// CRITICAL: Use Level 1 interrupt (FreeRTOS uses ESP_INTR_FLAG_LEVEL1 for SYSTIMER)
+	// Interrupt 1 is Level 1, interrupt 23 is Level 3
+	const cpuInterruptForSystimer = 1 // CPU-level interrupt line (Level 1)
 
 	// Compute period in timer ticks: ticks = Freq * period
 	periodTicks := uint32((systimerClockHz * tickPeriodNs) / 1_000_000_000)
@@ -696,38 +698,16 @@ func initSystimerTick() {
 	esp.SYSTIMER.SetCONF_TIMER_UNIT0_WORK_EN(1)
 	println("SYST: UNIT0 counter enabled")
 
-	// 4. Configure TARGET0 - CRITICAL: Two-step initialization like ESP-IDF!
-	// ESP-IDF sequence (port_systick.c:93-103):
-	//   Step 1: systimer_hal_select_alarm_mode(..., SYSTIMER_ALARM_MODE_ONESHOT)  [line 94]
-	//   Step 2: systimer_hal_set_alarm_period(...)                                [line 102]
-	//   Step 3: systimer_hal_select_alarm_mode(..., SYSTIMER_ALARM_MODE_PERIOD)   [line 103]
-	// WHY: Hardware requires ONESHOT mode init before switching to PERIOD mode!
-
-	// Step 1: Connect to UNIT0 and set ONESHOT mode first (CRITICAL!)
-	// ESP-IDF: systimer_hal_connect_alarm_counter(&systimer_hal, alarm_id, SYSTIMER_COUNTER_OS_TICK);
-	//          systimer_hal_select_alarm_mode(&systimer_hal, alarm_id, SYSTIMER_ALARM_MODE_ONESHOT);
-	println("SYST: Step 1: Configuring TARGET0 as ONESHOT initially...")
+	// 4. Configure TARGET0 - FreeRTOS sequence (port_systick.c:93-103)
+	// Initialize alarm to ONESHOT first (required by ESP-IDF!)
+	// ESP-IDF: systimer_hal_select_alarm_mode(&systimer_hal, alarm_id, SYSTIMER_ALARM_MODE_ONESHOT);
+	println("SYST: Initializing TARGET0 in ONESHOT mode...")
 	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_TIMER_UNIT_SEL(0) // Connect to UNIT0
-	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD_MODE(0)    // ONESHOT mode (period_mode = 0)
-	println("SYST: TARGET0 -> UNIT0, ONESHOT mode (temporary)")
+	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD_MODE(0)    // ONESHOT first!
+	println("SYST: TARGET0 -> UNIT0, ONESHOT mode")
 
-	// Step 2: Set period value
-	// ESP-IDF: systimer_hal_set_alarm_period(&systimer_hal, alarm_id, 1000000UL / CONFIG_FREERTOS_HZ);
-	println("SYST: Step 2: Setting period...")
-	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD(periodTicks) // Set period (16000 ticks = 1ms @ 16MHz)
-	println("SYST: Period set to", periodTicks, "ticks")
-
-	// Step 3: Switch to PERIODIC mode
-	// ESP-IDF: systimer_hal_select_alarm_mode(&systimer_hal, alarm_id, SYSTIMER_ALARM_MODE_PERIOD);
-	println("SYST: Step 3: Switching to PERIODIC mode...")
-	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD_MODE(1) // PERIODIC mode (period_mode = 1)
-	println("SYST: TARGET0 now in PERIODIC mode!")
-
-	// Configure counter stall behavior (ESP-IDF does this!)
+	// Configure counter stall behavior
 	// ESP-IDF: systimer_hal_counter_can_stall_by_cpu(&systimer_hal, SYSTIMER_COUNTER_OS_TICK, cpuid, true);
-	// File: components/freertos/port_systick.c:85
-	// Formula: bit = (28 - counter_id * 2) - cpu_id = (28 - 0*2) - 0 = 28
-	// This allows CPU0 to stall UNIT0 counter (useful for debugging)
 	println("SYST: Configuring counter stall for CPU0...")
 	confStall := esp.SYSTIMER.CONF.Get()
 	confStall |= (1 << 28) // Enable stall for UNIT0 by CPU0
@@ -755,10 +735,28 @@ func initSystimerTick() {
 	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(0)
 	println("SYST: Alarm disabled for configuration")
 
-	// Apply period value
+	// Set period (CRITICAL: must set before apply!)
+	// ESP-IDF: systimer_ll_set_alarm_period(dev, alarm_id, period)
+	// Implementation: dev->target_conf[alarm_id].target_period = period;
+	println("SYST: Setting period to", periodTicks, "ticks...")
+	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD(periodTicks)
+
+	// Set initial TARGET value (CRITICAL for PERIODIC mode!)
+	// In PERIODIC mode: interrupt fires when counter >= TARGET, then TARGET += PERIOD
+	// ESP-IDF: systimer_ll_set_alarm_target(dev, alarm_id, value)
+	// Implementation: dev->target_val[alarm_id].hi = value >> 32;
+	//                 dev->target_val[alarm_id].lo = value & 0xFFFFFFFF;
+	// File: components/hal/esp32s3/include/hal/systimer_ll.h:117
+	currentCounter := uint64(esp.SYSTIMER.UNIT0_VALUE_LO.Get()) | (uint64(esp.SYSTIMER.UNIT0_VALUE_HI.Get()) << 32)
+	initialTarget := currentCounter + uint64(periodTicks)
+	println("SYST: Setting initial TARGET to", uint32(initialTarget), "(counter=", uint32(currentCounter), "+ period=", periodTicks, ")")
+	esp.SYSTIMER.TARGET0_LO.Set(uint32(initialTarget & 0xFFFFFFFF))
+	esp.SYSTIMER.TARGET0_HI.Set(uint32(initialTarget >> 32))
+
+	// Apply all values (period + target)
 	// ESP-IDF: systimer_ll_apply_alarm_value(dev, alarm_id)
 	// Implementation: dev->comp_load[alarm_id].val = 0x01
-	println("SYST: Applying period via COMP_LOAD...")
+	println("SYST: Applying alarm config via COMP_LOAD...")
 	esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1)
 
 	// Clear interrupt flags
@@ -771,6 +769,14 @@ func initSystimerTick() {
 	// File: components/hal/systimer_hal.c:119 (inside systimer_hal_set_alarm_period)
 	println("SYST: Enabling alarm (WORK_EN=1)...")
 	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(1)
+
+	// CRITICAL: Switch to PERIODIC mode AFTER set_alarm_period! (FreeRTOS does this!)
+	// ESP-IDF: systimer_hal_select_alarm_mode(&systimer_hal, alarm_id, SYSTIMER_ALARM_MODE_PERIOD);
+	// File: components/freertos/port_systick.c:103
+	// Implementation: dev->target_conf[alarm_id].target_period_mode = 1;
+	println("SYST: Switching to PERIODIC mode (AFTER enable)...")
+	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD_MODE(1)
+	println("SYST: TARGET0 now in PERIODIC mode!")
 
 	// THEN enable interrupt (like ESP-IDF!)
 	// ESP-IDF: systimer_hal_enable_alarm_int(&systimer_hal, alarm_id)
@@ -812,27 +818,60 @@ func initSystimerTick() {
 	ien := device.AsmFull("rsr.intenable {}", nil)
 	println("SYST: Current INTENABLE:", uint32(uintptr(ien)))
 
-	println("SYST: Setting bit 23...")
+	println("SYST: Setting bit", cpuInterruptForSystimer, "...")
 	ien |= (1 << cpuInterruptForSystimer)
 	println("SYST: New INTENABLE:", uint32(uintptr(ien)))
 
-	// CRITICAL: Clear any pending SYSTIMER interrupt RIGHT before enabling INTENABLE
-	// Otherwise we get infinite interrupt loop!
-	println("SYST: Clearing SYSTIMER INT_ST before enabling INTENABLE...")
+	// CRITICAL: Check current counter value before enabling
+	counterNow := uint64(esp.SYSTIMER.UNIT0_VALUE_LO.Get()) | (uint64(esp.SYSTIMER.UNIT0_VALUE_HI.Get()) << 32)
+	targetNow := uint64(esp.SYSTIMER.TARGET0_LO.Get()) | (uint64(esp.SYSTIMER.TARGET0_HI.Get()) << 32)
+	println("SYST: Before INTENABLE: counter=", uint32(counterNow), "target=", uint32(targetNow))
+
+	// If counter already passed target, re-arm target!
+	if counterNow >= targetNow {
+		println("SYST: ⚠️  Counter passed target! Re-arming target...")
+		newTarget := counterNow + uint64(periodTicks)
+		esp.SYSTIMER.TARGET0_LO.Set(uint32(newTarget & 0xFFFFFFFF))
+		esp.SYSTIMER.TARGET0_HI.Set(uint32(newTarget >> 32))
+		esp.SYSTIMER.SetCOMP0_LOAD_TIMER_COMP0_LOAD(1)
+		println("SYST: New target set to", uint32(newTarget))
+	}
+
+	// CRITICAL: Check INT_RAW before enabling!
+	intRawBefore := esp.SYSTIMER.INT_RAW.Get()
+	intStBefore := esp.SYSTIMER.INT_ST.Get()
+	println("SYST: Before clear: INT_RAW=", intRawBefore, "INT_ST=", intStBefore)
+
+	// CRITICAL: Atomic clear + enable in one ASM block
+	// Otherwise we get race condition between clear and enable!
+	println("SYST: Clearing SYSTIMER INT_ST and enabling INTENABLE atomically...")
 	esp.SYSTIMER.INT_CLR.Set(1 << 0)
 
-	// Also clear CPU interrupt if pending
+	// Verify cleared
+	intRawAfter := esp.SYSTIMER.INT_RAW.Get()
+	intStAfter := esp.SYSTIMER.INT_ST.Get()
+	println("SYST: After clear: INT_RAW=", intRawAfter, "INT_ST=", intStAfter)
+
+	// TEMPORARY: Disable SYSTIMER to test ISR with ONE interrupt only
+	println("SYST: TEMPORARILY disabling SYSTIMER before enabling INTENABLE...")
+	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(0)
+	println("SYST: SYSTIMER disabled")
+
+	// Clear CPU interrupt (like ESP-IDF)
 	device.AsmFull("wsr.intclear {v}", map[string]interface{}{
 		"v": uintptr(1 << cpuInterruptForSystimer),
 	})
 	device.AsmFull("rsync", nil)
-	println("SYST: Cleared, now writing INTENABLE...")
 
+	// Write INTENABLE with proper value (minimal ISR now!)
+	println("SYST: Writing INTENABLE with bit 1 (minimal ISR test)...")
 	device.AsmFull("wsr.intenable {v}", map[string]interface{}{"v": ien})
-	println("SYST: Wrote INTENABLE, doing rsync...")
+	device.AsmFull("rsync", nil)
+	println("SYST: INTENABLE written - if you see this, minimal ISR WORKS!")
 
 	device.AsmFull("rsync", nil)
-	println("SYST: INTENABLE bit 23 set - interrupts now ACTIVE!")
+
+	println("SYST: INTENABLE bit", cpuInterruptForSystimer, "set - interrupts now ACTIVE!")
 
 	// PERIODIC mode: alarm auto-reloads, just wait for interrupts
 	println("SYST: Waiting for interrupts...")
@@ -858,14 +897,18 @@ func initSystimerTick() {
 			// Read ASM counter
 			asmCount := isrCallCount[0]
 
-			// Read INTERRUPT register to see if bit 23 is active
+			// Read INTERRUPT register to see if our bit is active
 			intReg := device.AsmFull("rsr.interrupt {}", nil)
-			intBit23 := (uint32(uintptr(intReg)) >> 23) & 1
+			intBit23 := (uint32(uintptr(intReg)) >> cpuInterruptForSystimer) & 1
 
 			// Read SYSTIMER INT_ST
 			intST := esp.SYSTIMER.INT_ST.Get()
 
-			println("SYST: iter", i, "ASM:", asmCount, "INT[23]:", intBit23, "INT_ST:", intST)
+			// CRITICAL: Check if WORK_EN is still set!
+			confNow := esp.SYSTIMER.CONF.Get()
+			workEnNow := (confNow >> 24) & 1
+
+			println("SYST: iter", i, "ASM:", asmCount, "INT["+string(rune(cpuInterruptForSystimer+'0'))+"]: ", intBit23, "INT_ST:", intST, "WORK_EN:", workEnNow)
 		}
 		device.Asm("nop")
 	}
