@@ -18,6 +18,11 @@ import (
 	"errors"
 )
 
+// CPU interrupt line for SYSTIMER (Level-1, free in ESP-IDF table)
+// MUST match cpuInterruptForSystimer in runtime_esp32s3.go
+// NOTE: INT6 and INT7 are SPECIAL (Xtensa core timers) and cannot be used!
+const systimerCPUInterrupt = 1
+
 // State represents the previous INTLEVEL value (bits [3:0] of PS register on Xtensa).
 // We store only INTLEVEL, not the entire PS register, to avoid clobbering other PS bits
 // that may have changed between Disable() and Restore() (like CALLINC, WOE, etc.)
@@ -104,8 +109,8 @@ func handleInterrupt(intNum uint32) {
 	// Increment counter
 	handleInterruptCallCount++
 
-	// Handle interrupt 23 (SYSTIMER)
-	if intNum == 23 {
+	// Handle SYSTIMER interrupt
+	if intNum == systimerCPUInterrupt {
 		// Safety: Stop timer after 5 calls during testing
 		esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(0) // Stop timer
 
@@ -156,7 +161,7 @@ func callHandler(n int) {
 	switch n {
 	case 0:
 		callHandlers(0)
-	case 1:
+	case 1: // SYSTIMER_TARGET0 CPU interrupt (Level-1)
 		callHandlers(1)
 	case 2:
 		callHandlers(2)
@@ -200,8 +205,6 @@ func callHandler(n int) {
 		callHandlers(21)
 	case 22:
 		callHandlers(22)
-	case 23:
-		callHandlers(23)
 	case 24:
 		callHandlers(24)
 	case 25:

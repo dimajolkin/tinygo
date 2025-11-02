@@ -148,11 +148,7 @@ _frxt_int_exit:
  */
 _xt_level1_int_handler_entry:
     /* ULTRA-MINIMAL ISR for diagnosis - only increment counter and clear flags */
-    
-    /* Save only a0, a2, a3 (minimal save) */
-    s32i    a0, sp, XT_STK_A0
-    s32i    a2, sp, XT_STK_A2
-    s32i    a3, sp, XT_STK_A3
+    /* NOTE: a0, a2, a3 already saved by _xt_lowint1, we can use them as scratch! */
     
     /* Increment debug counter */
     movi    a2, _isr_call_count
@@ -179,19 +175,14 @@ _xt_level1_int_handler_entry:
     s32i    a3, a2, 0
     memw
     
-    /* Clear CPU interrupt line 23 */
-    movi    a2, 0x800000            /* 1 << 23 */
+    /* Clear CPU interrupt line 1 (SYSTIMER) - CRITICAL! */
+    movi    a2, 0x2                 /* 1 << 1 */
     wsr.intclear a2
     rsync
     
-    /* Restore registers in reverse order */
-    l32i    a3, sp, XT_STK_A3
-    l32i    a2, sp, XT_STK_A2
-    l32i    a0, sp, XT_STK_A0
-    
-    /* Return from exception - CPU restores PC from EPC1 and PS automatically */
-    rsync
-    rfe
+    /* Jump to _xt_user_exit - it will restore all saved context */
+    l32i    a0, sp, XT_STK_EXIT
+    jx      a0
 
 /*
  * _xt_unhandled_exception - Обработчик необработанного исключения
