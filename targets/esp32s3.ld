@@ -77,19 +77,14 @@ SECTIONS
         KEEP(*(.Level7InterruptVector.text));
         . = _vector_base + 0x140;
         
-        /* CRITICAL: Dispatcher code MUST be in .vectors for call0 to reach!
-         * Place _xt_user_exc, _xt_lowint1, _xt_user_exit BEFORE literals
-         * so UserExceptionVector's call0 can reach _xt_user_exc
+        /* Set explicit boundary for vectors (ESP-IDF pattern)
+         * Reserve 384 bytes for vectors:
+         * - 10 vectors × 32 bytes = 320 bytes
+         * - 64 bytes for alignment and safety margin
          */
-        . = ALIGN(4);
-        *(.literal._xt_user_exc)
-        *(.text._xt_user_exc)
-        *(.literal._xt_lowint1)
-        *(.text._xt_lowint1)
-        *(.literal._xt_user_exit)
-        *(.text._xt_user_exit)
+        . = _vector_base + 0x180;
         
-        /* Collect ALL vector literals AFTER the dispatcher code (ESP-IDF style) */
+        /* Collect ALL vector literals AFTER the vector code (ESP-IDF style) */
         . = ALIGN(4);
         *(.*Vector.literal)
         
@@ -112,7 +107,14 @@ SECTIONS
         /* Mark start of .text section for diagnostics */
         _text_start = .;
         
-        /* Unhandled exception handler (stays in .text, not critical path) */
+        /* Dispatcher and low-level ISR code (moved from .vectors, ESP-IDF pattern)
+         * These must be in IRAM for interrupt handling but are not part of vector table */
+        *(.literal._xt_user_exc)
+        *(.text._xt_user_exc)
+        *(.literal._xt_lowint1)
+        *(.text._xt_lowint1)
+        *(.literal._xt_user_exit)
+        *(.text._xt_user_exit)
         *(.literal._xt_unhandled_exception)
         *(.text._xt_unhandled_exception)
         
