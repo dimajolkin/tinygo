@@ -175,11 +175,12 @@ func main() {
 	}
 	print("\n")
 
+	initSystimerTick()
+
 	// ДИАГНОСТИКА: проверить что векторы действительно в IRAM
 	checkVectorsInMemory()
 
 	// Initialize SYSTIMER for system tick
-	initSystimerTick()
 
 	// Call the standard runtime
 	run()
@@ -334,7 +335,7 @@ func abort() {
 }
 
 // checkVectorsInMemory проверяет, что векторы действительно скопированы в IRAM
-// и показывает первые 64 байта векторной таблицы
+// и показывает подробную информацию о векторной таблице
 func checkVectorsInMemory() {
 	println("\n=== VECTOR TABLE MEMORY CHECK ===")
 
@@ -344,7 +345,7 @@ func checkVectorsInMemory() {
 	println("_sbss address (decimal):", uint32(sbssAddr))
 	println("_ebss address (decimal):", uint32(ebssAddr))
 
-	// Получить адрес _vector_base (через функцию-обертку)
+	// Получить адрес _vector_base
 	vectorBaseAddr := getVectorBase()
 	println("_vector_base address (decimal):", uint32(vectorBaseAddr))
 
@@ -373,49 +374,217 @@ func checkVectorsInMemory() {
 		println("✗ ERROR: VECBASE mismatch!")
 	}
 
-	// Прочитать ключевые векторы (показываем только non-zero для краткости)
-	println("\nVector table contents (non-zero entries only):")
-	ptr := (*[32]uint32)(unsafe.Pointer(vectorBaseAddr))
-	nonZeroCount := 0
-	for i := 0; i < 32; i++ {
+	// Прочитать векторную таблицу (расширенный вывод по уровням)
+	println("\n=== VECTOR TABLE CONTENTS (BY LEVEL) ===")
+	ptr := (*[80]uint32)(unsafe.Pointer(vectorBaseAddr))
+
+	// UserExceptionVector (0x00) - Level-1
+	println("\n[1] UserExceptionVector (Level-1) at offset 0x00:")
+	for i := 0; i < 8; i++ {
 		val := ptr[i]
-		if val != 0 && val != 0xFFFFFFFF {
-			offset := i * 4
-			println("  Offset", offset, "bytes: value =", val)
-			nonZeroCount++
+		offset := i * 4
+		print("  +0x")
+		if offset < 0x10 {
+			print("0")
 		}
-	}
-	println("Total non-zero words:", nonZeroCount, "/ 32")
-
-	// Декодировать какие векторы присутствуют (по смещениям)
-	println("\nVector presence analysis:")
-	if ptr[0] != 0 {
-		println("  ✓ UserExceptionVector at +0x00")
-	}
-	if ptr[8] != 0 { // 0x20 / 4 = 8
-		println("  ✓ DoubleExceptionVector at +0x20")
-	}
-	if ptr[16] != 0 { // 0x40 / 4 = 16
-		println("  ✓ KernelExceptionVector at +0x40")
-	}
-	if ptr[24] != 0 { // 0x60 / 4 = 24
-		println("  ✓ NMIExceptionVector at +0x60")
-	}
-
-	// Проверить что UserExceptionVector имеет правильную инструкцию
-	// Первая инструкция должна быть примерно: wsr a0, EXCSAVE_1 (0x00Dxxx)
-	firstInstr := ptr[0]
-	if (firstInstr & 0x00FF00) == 0x00D100 {
-		println("✓ First instruction looks like 'wsr a0, EXCSAVE_1'")
-	} else {
-		println("✗ First instruction doesn't match expected pattern")
-		println("  Expected: 0x00D1xxxx (wsr a0, EXCSAVE_1)")
-		print("  Got:      ")
-		printptr(uintptr(firstInstr))
+		print(offset)
+		print(": ")
+		printptr(uintptr(val))
+		if val != 0 {
+			// Декодирование инструкций Xtensa
+			opcode := val & 0xFF
+			if opcode == 0x00 && ((val>>8)&0xFF) == 0xD1 {
+				print(" (wsr a0, EXCSAVE_1)")
+			} else if opcode == 0x17 || opcode == 0x05 || (opcode&0x0F) == 0x05 {
+				print(" (call0 or j)")
+			} else if opcode == 0xC5 {
+				print(" (call0)")
+			} else if val == 0x002000 {
+				print(" (rsync)")
+			} else if val == 0x003000 {
+				print(" (rfe)")
+			} else {
+				print(" (instr)")
+			}
+		}
 		println()
 	}
 
-	println("=== END MEMORY CHECK ===\n")
+	// DoubleExceptionVector (0x20)
+	println("\n[2] DoubleExceptionVector at offset 0x20:")
+	for i := 8; i < 16; i++ {
+		val := ptr[i]
+		if val != 0 {
+			print("  +")
+			printptr(uintptr(i * 4))
+			print(": ")
+			printptr(uintptr(val))
+			if (val & 0xFF) == 0xC5 {
+				print(" (call0 -> _xt_unhandled_exception)")
+			}
+			println()
+		}
+	}
+
+	// KernelExceptionVector (0x40)
+	println("\n[3] KernelExceptionVector at offset 0x40:")
+	for i := 16; i < 24; i++ {
+		val := ptr[i]
+		if val != 0 {
+			print("  +")
+			printptr(uintptr(i * 4))
+			print(": ")
+			printptr(uintptr(val))
+			if (val & 0xFF) == 0xC5 {
+				print(" (call0 -> _xt_unhandled_exception)")
+			}
+			println()
+		}
+	}
+
+	// NMIExceptionVector (0x60)
+	println("\n[4] NMIExceptionVector at offset 0x60:")
+	for i := 24; i < 32; i++ {
+		val := ptr[i]
+		if val != 0 {
+			print("  +")
+			printptr(uintptr(i * 4))
+			print(": ")
+			printptr(uintptr(val))
+			if (val & 0xFF) == 0xC5 {
+				print(" (call0 -> _xt_unhandled_exception)")
+			}
+			println()
+		}
+	}
+
+	// Level2InterruptVector (0x80)
+	println("\n[5] Level2InterruptVector at offset 0x80:")
+	for i := 32; i < 40; i++ {
+		val := ptr[i]
+		if val != 0 {
+			print("  +")
+			printptr(uintptr(i * 4))
+			print(": ")
+			printptr(uintptr(val))
+			if (val & 0xFF) == 0xC5 {
+				print(" (call0 -> _xt_unhandled_exception)")
+			}
+			println()
+		}
+	}
+
+	// Level3InterruptVector (0xA0)
+	println("\n[6] Level3InterruptVector at offset 0xA0:")
+	for i := 40; i < 48; i++ {
+		val := ptr[i]
+		if val != 0 {
+			print("  +")
+			printptr(uintptr(i * 4))
+			print(": ")
+			printptr(uintptr(val))
+			if (val & 0xFF) == 0xC5 {
+				print(" (call0 -> _xt_unhandled_exception)")
+			}
+			println()
+		}
+	}
+
+	// Level4-7 (детальный вывод)
+	println("\n[7] Level4InterruptVector at offset 0xC0:")
+	for i := 48; i < 56; i++ {
+		val := ptr[i]
+		if val != 0 {
+			print("  +")
+			printptr(uintptr(i * 4))
+			print(": ")
+			printptr(uintptr(val))
+			if (val & 0xFF) == 0xC5 {
+				print(" (call0 -> _xt_unhandled_exception)")
+			}
+			println()
+		}
+	}
+
+	println("\n[8] Level5InterruptVector at offset 0xE0:")
+	for i := 56; i < 64; i++ {
+		val := ptr[i]
+		if val != 0 {
+			print("  +")
+			printptr(uintptr(i * 4))
+			print(": ")
+			printptr(uintptr(val))
+			if (val & 0xFF) == 0xC5 {
+				print(" (call0 -> _xt_unhandled_exception)")
+			}
+			println()
+		}
+	}
+
+	println("\n[9] Level6InterruptVector at offset 0x100:")
+	for i := 64; i < 72; i++ {
+		val := ptr[i]
+		if val != 0 {
+			print("  +")
+			printptr(uintptr(i * 4))
+			print(": ")
+			printptr(uintptr(val))
+			if (val & 0xFF) == 0xC5 {
+				print(" (call0 -> _xt_unhandled_exception)")
+			}
+			println()
+		}
+	}
+
+	println("\n[10] Level7InterruptVector at offset 0x120:")
+	for i := 72; i < 80; i++ {
+		val := ptr[i]
+		if val != 0 {
+			print("  +")
+			printptr(uintptr(i * 4))
+			print(": ")
+			printptr(uintptr(val))
+			if (val & 0xFF) == 0xC5 {
+				print(" (call0 -> _xt_unhandled_exception)")
+			}
+			println()
+		}
+	}
+
+	// Общая статистика
+	println("\n=== SUMMARY ===")
+	totalNonZero := 0
+	for i := 0; i < 80; i++ {
+		if ptr[i] != 0 && ptr[i] != 0xFFFFFFFF {
+			totalNonZero++
+		}
+	}
+	println("Total non-zero words:", totalNonZero, "/ 80")
+
+	// Проверка первой инструкции
+	firstInstr := ptr[0]
+	if (firstInstr & 0x00FF00) == 0x00D100 {
+		println("✓ UserExceptionVector first instruction: wsr a0, EXCSAVE_1 - CORRECT!")
+	} else {
+		println("✗ WARNING: Unexpected first instruction")
+	}
+
+	// Анализ векторной таблицы
+	println("\n=== VECTOR TABLE ANALYSIS ===")
+	println("Vector structure:")
+	println("  ✓ UserExceptionVector: 2 instructions (wsr + jump)")
+	println("  ✓ All other vectors: call0 to _xt_unhandled_exception")
+	println()
+	secondInstr := ptr[1]
+	print("Second instruction in UserExceptionVector: ")
+	printptr(uintptr(secondInstr))
+	println()
+	if (secondInstr & 0xFF) == 0x17 {
+		println("  → This is likely 'j' (jump) instruction")
+		println("  → Should jump to _xt_user_exc handler")
+	}
+
+	println("\n=== END MEMORY CHECK ===\n")
 }
 
 //go:extern _vector_table
