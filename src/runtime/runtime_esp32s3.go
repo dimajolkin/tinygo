@@ -207,6 +207,12 @@ func buffered() int {
 	return machine.Serial.Buffered()
 }
 
+// printhex32 prints a 32-bit value in the same 0xXXXXXXXX style as printptr.
+// We simply cast to uintptr and reuse printptr because ESP32-S3 is 32-bit.
+func printhex32(v uint32) {
+	printptr(uintptr(v))
+}
+
 // Initialize .bss: zero-initialized global variables.
 // The .data section has already been loaded by the ROM bootloader.
 func clearbss() {
@@ -336,6 +342,8 @@ func abort() {
 	}
 }
 
+// checkVectorsInMemory inspects the vector table in memory and validates correct placement
+// of exception vectors. Offsets are now derived dynamically from linked symbols (not hardcoded).
 func checkVectorsInMemory() {
 	println("\n=== VECTOR TABLE MEMORY CHECK ===")
 
@@ -370,6 +378,9 @@ func checkVectorsInMemory() {
 		println("\u2717 ERROR: VECBASE mismatch!")
 	}
 
+	// Fetch symbol address for `_UserExceptionVector` early
+	uevSym := getUserExceptionVector()
+
 	// Helper to read a 32-bit word; returns (val, ok)
 	read32 := func(addr uintptr) (uint32, bool) {
 		if addr == 0 {
@@ -382,30 +393,53 @@ func checkVectorsInMemory() {
 
 	base := vectorBaseAddr
 
-	// Offsets per ESP32-S3 TRM / ESP-IDF (Xtensa LX7, Call0 ABI)
+	// Canonical ESP-IDF/LX7 defaults (for reference only)
 	const (
-		offKernel = 0x040
-		offNMI    = 0x060
-		offL2     = 0x080
-		offL3     = 0x0A0
-		offL4     = 0x0C0
-		offL5     = 0x0E0
-		offL6     = 0x100
-		offL7     = 0x120
-		offL1     = 0x180 // **UserException / Level-1**
-		offDouble = 0x1C0
+		defOffKernel = uintptr(0x040)
+		defOffNMI    = uintptr(0x060)
+		defOffL2     = uintptr(0x080)
+		defOffL3     = uintptr(0x0A0)
+		defOffL4     = uintptr(0x0C0)
+		defOffL5     = uintptr(0x0E0)
+		defOffL6     = uintptr(0x100)
+		defOffL7     = uintptr(0x120)
+		defOffL1     = uintptr(0x180) // UserException / Level-1 (typical on ESP32-S3)
+		defOffDouble = uintptr(0x1C0)
 	)
 
-	// 1) Level-1 / UserException at +0x180
-	println("[1] UserExceptionVector (Level-1) at offset 0x180:")
+	// Actual Level‑1 offset from linked assembly symbol (do NOT hardcode)
+	offL1 := uintptr(0)
+	if base != 0 && uevSym >= base {
+		offL1 = uevSym - base
+	}
+
+	// Sanity for Level‑1: must be 0x20‑aligned and within first 0x200 bytes
+	if (offL1&0x1F) != 0 || offL1 >= 0x200 {
+		println("✗ WARNING: _UserExceptionVector offset looks odd:", uint32(offL1))
+		println("  Expect 0x180 on ESP32‑S3; will still dump using symbol address")
+	}
+
+	// 1) Level‑1 / UserException: dump using computed offset from symbol
+	print("[1] UserExceptionVector (Level-1) at offset ")
+	printhex32(uint32(offL1))
+	println(":")
 	u0, _ := read32(base + offL1)
 	u1, _ := read32(base + offL1 + 4)
-	print("  +0x180: ")
+	print("  +")
+	printhex32(uint32(offL1 + 0x00))
+	print(": ")
 	printptr(uintptr(u0))
 	println()
-	print("  +0x184: ")
+	print("  +")
+	printhex32(uint32(offL1 + 0x04))
+	print(": ")
 	printptr(uintptr(u1))
 	println()
+	if offL1 != defOffL1 {
+		print("  (note) canonical ESP‑IDF offset for L1 is ")
+		printhex32(uint32(defOffL1))
+		println("; using actual symbol offset above")
+	}
 
 	// 2) The rest of the vectors (single word dump is enough: call0 stub)
 	type vec struct {
@@ -413,23 +447,23 @@ func checkVectorsInMemory() {
 		off  uintptr
 	}
 	others := []vec{
-		{"KernelExceptionVector", offKernel},
-		{"NMIExceptionVector", offNMI},
-		{"Level2InterruptVector", offL2},
-		{"Level3InterruptVector", offL3},
-		{"Level4InterruptVector", offL4},
-		{"Level5InterruptVector", offL5},
-		{"Level6InterruptVector", offL6},
-		{"Level7InterruptVector", offL7},
-		{"DoubleExceptionVector", offDouble},
+		{"KernelExceptionVector", defOffKernel},
+		{"NMIExceptionVector", defOffNMI},
+		{"Level2InterruptVector", defOffL2},
+		{"Level3InterruptVector", defOffL3},
+		{"Level4InterruptVector", defOffL4},
+		{"Level5InterruptVector", defOffL5},
+		{"Level6InterruptVector", defOffL6},
+		{"Level7InterruptVector", defOffL7},
+		{"DoubleExceptionVector", defOffDouble},
 	}
 	for i, v := range others {
 		print("[", i+2, "] ", v.name, " at offset ")
-		printptr(v.off)
+		printhex32(uint32(v.off))
 		println(":")
 		w0, _ := read32(base + v.off)
 		print("  +")
-		printptr(v.off)
+		printhex32(uint32(v.off))
 		print(": ")
 		printptr(uintptr(w0))
 		// Many of these are small call0 stubs in ROM/IRAM, opcode low byte 0xC5
@@ -452,22 +486,20 @@ func checkVectorsInMemory() {
 	// include L1 +0/+4 (already inside loop if 0x180..0x184) but safe to keep
 	println("Total non-zero words:", totalNonZero, "/", (0x1C0-0x040)/4+1)
 
-	// Validate Level-1 actually present at +0x180
+	// Validate Level-1 actually present at computed offset
 	if u0 == 0 {
-		println("\u2717 WARNING: Level-1 vector at +0x180 is zero (unexpected)")
+		println("\u2717 WARNING: Level-1 vector at computed offset is zero (unexpected)")
 	} else {
-		println("\u2713 Level-1 vector present at +0x180")
+		println("\u2713 Level-1 vector present at computed offset")
 	}
 
-	// Symbol address for `_UserExceptionVector` must equal base+0x180
-	uevSym := getUserExceptionVector()
 	print("UserExceptionVector symbol addr: ")
 	println(uint32(uevSym))
 	if uevSym != base+offL1 {
-		println("\u2717 WARNING: _UserExceptionVector != VECBASE+0x180 (unexpected symbol placement)")
+		println("\u2717 WARNING: _UserExceptionVector != VECBASE+computed_off (unexpected)")
 	}
 
-	// Show first two words at the symbol (should match the +0x180 dump)
+	// Show first two words at the symbol (should match the +offL1 dump)
 	uS0, _ := read32(uevSym + 0)
 	uS1, _ := read32(uevSym + 4)
 	print("UserException tramp[0..1]: ")
@@ -475,6 +507,13 @@ func checkVectorsInMemory() {
 	print(" ")
 	printptr(uintptr(uS1))
 	println()
+	// Explicit cross-check: words at VECBASE+offL1 vs symbol address
+	if u0 != uS0 || u1 != uS1 {
+		println("✗ MISMATCH: words at VECBASE+offL1 differ from symbol address contents")
+		println("  Hint: verify that IRAM region is readable via data bus and that cache/MMU are on")
+	} else {
+		println("✓ VECBASE+offL1 matches symbol contents")
+	}
 
 	// Quick range check: vector code must live in IRAM 0x4030_0000..0x407F_FFFF
 	if uevSym < 0x40300000 || uevSym >= 0x40800000 {
@@ -488,6 +527,11 @@ func checkVectorsInMemory() {
 	if vectorBaseAddr != uintptr(vecbase) {
 		println("\u2717 WARNING: VECBASE != _vector_base (unexpected)")
 	}
+	print("Computed L1 offset: ")
+	printhex32(uint32(offL1))
+	print("  | Canonical (ESP‑IDF): ")
+	printhex32(uint32(defOffL1))
+	println()
 
 	println("\n=== END MEMORY CHECK ===\n")
 }

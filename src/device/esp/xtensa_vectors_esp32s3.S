@@ -91,6 +91,9 @@
 #define LEND            1
 #define LCOUNT          2
 
+/* EXCCAUSE value for Level-1 interrupt on Xtensa LX7 */
+#define EXCCAUSE_LEVEL1  4
+
 .extern _xt_level1_int_handler
 .extern _xt_unhandled_exception
 .extern _frxt_int_depth
@@ -125,6 +128,7 @@ _isr_call_count:
 _UserExceptionVector:
     wsr     a0, EXCSAVE_1       /* preserve a0 in EXCSAVE1 */
     call0   _xt_user_exc        /* jump to user exception handler */
+.size       _UserExceptionVector, . - _UserExceptionVector
 .end        literal_prefix
 
 /* Place exception handlers in .iram1.text for proximity to vectors */
@@ -137,13 +141,15 @@ _xt_user_exc:
     /* Check if this is a Level-1 interrupt (EXCCAUSE == 4) */
     rsr     a0, EXCSAVE_1                   /* restore a0 saved by vector entry */
     rsr     a3, EXCCAUSE                    /* read EXCCAUSE into a3 */
-    bnei    a3, 4, _xt_to_unhandled_exc     /* not Level-1 interrupt? go to exception handler */
+    bnei    a3, EXCCAUSE_LEVEL1, _xt_to_unhandled_exc     /* not Level-1 interrupt? go to exception handler */
     j       _xt_lowint1                     /* EXPLICIT jump to _xt_lowint1! */
 
 /* Trampoline for unhandled exception (must be close for bnei) */
 .align 4
 _xt_to_unhandled_exc:
     call0   _xt_unhandled_exception         /* long jump to real handler */
+
+.size       _xt_user_exc, . - _xt_user_exc
 
 /* Low-level level-1 interrupt entry: call Go dispatcher directly */
 .align 4
@@ -160,7 +166,7 @@ _xt_lowint1:
     s32i    a1, sp, 4                       /* save a1 (sp already adjusted) */
     s32i    a2, sp, 8                       /* save a2 (we're using it as temp) */
     s32i    a3, sp, 12                      /* save a3 */
-    
+
     /* Save a4-a15 (might be used by Go) */
     s32i    a4, sp, 16
     s32i    a5, sp, 20
@@ -209,9 +215,11 @@ _xt_lowint1:
 
     /* Deallocate stack frame */
     addi    sp, sp, 64
-    
+
     /* Return from exception */
     rfe
+
+.size       _xt_lowint1, . - _xt_lowint1
 
 /* Literal pool for _xt_lowint1 */
 .align 4
@@ -232,6 +240,8 @@ _xt_user_exit:
     rsync
     rfe                                      /* return from exception */
 
+.size       _xt_user_exit, . - _xt_user_exit
+
 /*
  * Exception and Interrupt Vectors (Level 2-7, Double, Kernel, NMI)
  * Based on ESP-IDF esp-idf/components/xtensa/xtensa_vectors.S
@@ -243,6 +253,7 @@ _xt_user_exit:
     .align      4
 _DoubleExceptionVector:
     call0   _xt_unhandled_exception
+    .size       _DoubleExceptionVector, . - _DoubleExceptionVector
     .end        literal_prefix
 
 /* KernelException - privileged instruction in user mode (VECBASE+0x040) */
@@ -251,6 +262,7 @@ _DoubleExceptionVector:
     .align      4
 _KernelExceptionVector:
     call0   _xt_unhandled_exception
+    .size       _KernelExceptionVector, . - _KernelExceptionVector
     .end        literal_prefix
 
 /* NMI - Non-Maskable Interrupt (VECBASE+0x060) */
@@ -259,6 +271,7 @@ _KernelExceptionVector:
     .align      4
 _NMIExceptionVector:
     call0   _xt_unhandled_exception
+    .size       _NMIExceptionVector, . - _NMIExceptionVector
     .end        literal_prefix
 
 /* Level 2 Interrupt - medium priority (VECBASE+0x080) */
@@ -267,6 +280,7 @@ _NMIExceptionVector:
     .align      4
 _Level2InterruptVector:
     call0   _xt_unhandled_exception
+    .size       _Level2InterruptVector, . - _Level2InterruptVector
     .end        literal_prefix
 
 /* Level 3 Interrupt - high priority (VECBASE+0x0A0) */
@@ -275,6 +289,7 @@ _Level2InterruptVector:
     .align      4
 _Level3InterruptVector:
     call0   _xt_unhandled_exception
+    .size       _Level3InterruptVector, . - _Level3InterruptVector
     .end        literal_prefix
 
 /* Level 4 Interrupt (VECBASE+0x0C0) */
@@ -283,6 +298,7 @@ _Level3InterruptVector:
     .align      4
 _Level4InterruptVector:
     call0   _xt_unhandled_exception
+    .size       _Level4InterruptVector, . - _Level4InterruptVector
     .end        literal_prefix
 
 /* Level 5 Interrupt (VECBASE+0x0E0) */
@@ -291,6 +307,7 @@ _Level4InterruptVector:
     .align      4
 _Level5InterruptVector:
     call0   _xt_unhandled_exception
+    .size       _Level5InterruptVector, . - _Level5InterruptVector
     .end        literal_prefix
 
 /* Level 6 Interrupt (VECBASE+0x100) */
@@ -299,6 +316,7 @@ _Level5InterruptVector:
     .align      4
 _Level6InterruptVector:
     call0   _xt_unhandled_exception
+    .size       _Level6InterruptVector, . - _Level6InterruptVector
     .end        literal_prefix
 
 /* Level 7 Interrupt - highest priority, NMI-like (VECBASE+0x120) */
@@ -307,6 +325,7 @@ _Level6InterruptVector:
     .align      4
 _Level7InterruptVector:
     call0   _xt_unhandled_exception
+    .size       _Level7InterruptVector, . - _Level7InterruptVector
     .end        literal_prefix
 
 
