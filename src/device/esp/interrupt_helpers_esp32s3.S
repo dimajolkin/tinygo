@@ -24,15 +24,6 @@
 
 .section .text
 
-// Simple test function to verify linking works
-.global test_asm_func
-.type test_asm_func,@function
-.align 4
-test_asm_func:
-    entry   a1, 16          // create a small stack frame (windowed ABI)
-    movi    a2, 42          // return value in a2 (Xtensa C/TinyGo ABI)
-    retw.n                  // return and restore window
-
 // uint32_t read_interrupt(void)
 // Returns current pending interrupt mask (INTERRUPT register #226)
 .global read_interrupt

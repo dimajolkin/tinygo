@@ -688,14 +688,6 @@ func initSystimerTick() {
 	}
 	println("SYST: SYSTIMER frequency: 16MHz, period:", tickPeriodNs, "ns =", periodTicks, "ticks")
 
-	// TEST: Verify ASM linking works
-	testVal := interrupt.TestAsmFunc()
-	println("SYST: TEST ASM function returned:", testVal, "(expected 42)")
-	if testVal != 42 {
-		println("SYST: ERROR - ASM linking failed!")
-		return
-	}
-
 	// Temporarily block interrupts during configuration
 	println("SYST: Before Disable()...")
 	old := interrupt.Disable()

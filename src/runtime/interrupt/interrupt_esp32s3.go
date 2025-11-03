@@ -52,14 +52,6 @@ func rsil_1() uint32
 //go:linkname rsil_15 rsil_15
 func rsil_15() uint32
 
-//go:linkname test_asm_func test_asm_func
-func test_asm_func() uint32
-
-// TestAsmFunc calls test_asm_func from ASM to verify linking
-func TestAsmFunc() uint32 {
-	return test_asm_func()
-}
-
 // State represents the previous INTLEVEL value (bits [3:0] of PS register on Xtensa).
 // We store only INTLEVEL, not the entire PS register, to avoid clobbering other PS bits
 // that may have changed between Disable() and Restore() (like CALLINC, WOE, etc.)
