@@ -733,8 +733,9 @@ func initSystimerTick() {
 
 	// 3. Register interrupt handler
 	println("SYST: Registering handler...")
-	_ = interrupt.New(cpuInterruptForSystimer, systimerHandleInterrupt)
-	//intr.Enable()
+	intr := interrupt.New(cpuInterruptForSystimer, systimerHandleInterrupt)
+	println("SYST: Handler enabling...")
+	intr.Enable()
 	println("SYST: Handler registered & enabled")
 
 	// 5. Configure periodic alarm (ESP-IDF sequence)
