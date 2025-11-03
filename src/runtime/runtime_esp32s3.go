@@ -49,38 +49,6 @@ var userExceptionVectorSymbol [0]byte
 //go:extern _isr_call_count
 var isrCallCount [1]uint32
 
-// Assembly helper functions from interrupt_helpers_esp32s3.S
-
-//go:extern read_interrupt
-func read_interrupt() uint32
-
-//go:extern read_intenable
-func read_intenable() uint32
-
-//go:extern write_intenable
-func write_intenable(v uint32)
-
-//go:extern write_intset
-func write_intset(v uint32)
-
-//go:extern write_intclear
-func write_intclear(v uint32)
-
-//go:extern get_ps
-func get_ps() uint32
-
-//go:extern set_ps
-func set_ps(v uint32)
-
-//go:extern rsil_0
-func rsil_0() uint32
-
-//go:extern rsil_1
-func rsil_1() uint32
-
-//go:extern rsil_15
-func rsil_15() uint32
-
 // Helper functions to get addresses from linker symbols
 // These are needed because direct access to symbols doesn't work reliably in TinyGo
 func getVectorBase() uintptr {
@@ -766,7 +734,8 @@ func initSystimerTick() {
 	// 3. Register interrupt handler
 	println("SYST: Registering handler...")
 	_ = interrupt.New(cpuInterruptForSystimer, systimerHandleInterrupt)
-	println("SYST: Handler registered")
+	//intr.Enable()
+	println("SYST: Handler registered & enabled")
 
 	// 5. Configure periodic alarm (ESP-IDF sequence)
 	// ESP-IDF: systimer_hal_set_alarm_period() function:
@@ -864,12 +833,12 @@ func initSystimerTick() {
 
 	// NOW enable CPU interrupt line for SYSTIMER through INTENABLE
 	println("SYST: Reading INTENABLE...")
-	ien := device.AsmFull("rsr.intenable {}", nil)
-	println("SYST: Current INTENABLE:", uint32(uintptr(ien)))
+	ien := interrupt.ReadIntEnable()
+	println("SYST: Current INTENABLE:", ien)
 
 	println("SYST: Setting bit", cpuInterruptForSystimer, "...")
 	ien |= (1 << cpuInterruptForSystimer)
-	println("SYST: New INTENABLE:", uint32(uintptr(ien)))
+	println("SYST: New INTENABLE:", ien)
 
 	// CRITICAL: Check current counter value before enabling
 	counterNow := uint64(esp.SYSTIMER.UNIT0_VALUE_LO.Get()) | (uint64(esp.SYSTIMER.UNIT0_VALUE_HI.Get()) << 32)
@@ -901,25 +870,16 @@ func initSystimerTick() {
 	intStAfter := esp.SYSTIMER.INT_ST.Get()
 	println("SYST: After clear: INT_RAW=", intRawAfter, "INT_ST=", intStAfter)
 
-	// TEMPORARY: Disable SYSTIMER to test ISR with ONE interrupt only
-	println("SYST: TEMPORARILY disabling SYSTIMER before enabling INTENABLE...")
-	esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(0)
-	println("SYST: SYSTIMER disabled")
-
-	// Clear CPU interrupt (like ESP-IDF)
-	device.AsmFull("wsr.intclear {v}", map[string]interface{}{
-		"v": uintptr(1 << cpuInterruptForSystimer),
-	})
-	device.AsmFull("rsync", nil)
-
-	// Write INTENABLE with proper value (minimal ISR now!)
-	println("SYST: Writing INTENABLE with bit 1 (minimal ISR test)...")
-	device.AsmFull("wsr.intenable {v}", map[string]interface{}{"v": ien})
-	device.AsmFull("rsync", nil)
-	println("SYST: INTENABLE written - if you see this, minimal ISR WORKS!")
-
-	device.AsmFull("rsync", nil)
-
+	// Write INTENABLE with proper value
+	println("SYST: Reading INTENABLE...")
+	ien = interrupt.ReadIntEnable()
+	println("SYST: Current INTENABLE:", ien)
+	println("SYST: Setting bit", cpuInterruptForSystimer, "...")
+	ien |= (1 << cpuInterruptForSystimer)
+	println("SYST: New INTENABLE:", ien)
+	interrupt.WriteIntEnable(ien)
+	// Unmask CPU interrupts now that peripheral and mapping are armed
+	interrupt.SetPSIntLevel(0)
 	println("SYST: INTENABLE bit", cpuInterruptForSystimer, "set - interrupts now ACTIVE!")
 
 	// PERIODIC mode: alarm auto-reloads, just wait for interrupts
@@ -947,8 +907,8 @@ func initSystimerTick() {
 			asmCount := isrCallCount[0]
 
 			// Read INTERRUPT register to see if our bit is active
-			intReg := device.AsmFull("rsr.interrupt {}", nil)
-			intBit23 := (uint32(uintptr(intReg)) >> cpuInterruptForSystimer) & 1
+			intReg := interrupt.ReadInterrupt()
+			intBit23 := (intReg >> cpuInterruptForSystimer) & 1
 
 			// Read SYSTIMER INT_ST
 			intST := esp.SYSTIMER.INT_ST.Get()
@@ -959,7 +919,7 @@ func initSystimerTick() {
 
 			println("SYST: iter", i, "ASM:", asmCount, "INT["+string(rune(cpuInterruptForSystimer+'0'))+"]: ", intBit23, "INT_ST:", intST, "WORK_EN:", workEnNow)
 		}
-		device.Asm("nop")
+		device.Asm("waiti 0")
 	}
 
 	println("SYST: Wait loop completed, stopping alarm...")
@@ -992,9 +952,9 @@ func initSystimerTick() {
 	} else {
 		println("✗ ERROR: No SYSTIMER interrupts received!")
 		println("  INT_ST:", esp.SYSTIMER.INT_ST.Get(), "INT_ENA:", esp.SYSTIMER.INT_ENA.Get())
-		ien := device.AsmFull("rsr.intenable {}", nil)
-		ist := device.AsmFull("rsr.interrupt {}", nil)
-		println("  INTENABLE:", uint32(uintptr(ien)), "INTERRUPT:", uint32(uintptr(ist)))
+		ienErr := interrupt.ReadIntEnable()
+		istErr := interrupt.ReadInterrupt()
+		println("  INTENABLE:", ienErr, "INTERRUPT:", istErr)
 
 		// Detailed SYSTIMER diagnostics
 		println("\nDETAILED SYSTIMER STATE:")

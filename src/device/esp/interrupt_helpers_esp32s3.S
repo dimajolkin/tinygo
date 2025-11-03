@@ -30,7 +30,7 @@
 .type read_interrupt,@function
 .align 4
 read_interrupt:
-    rsr     a2, INTERRUPT_SR
+    rsr.interrupt a2
     retw.n
 
 // uint32_t read_intenable(void)
@@ -39,7 +39,7 @@ read_interrupt:
 .type read_intenable,@function
 .align 4
 read_intenable:
-    rsr     a2, INTENABLE_SR
+    rsr.intenable a2
     retw.n
 
 // void write_intenable(uint32_t v)
@@ -81,7 +81,7 @@ write_intclear:
 .type get_ps,@function
 .align 4
 get_ps:
-    rsr     a2, PS_SR
+    rsr.ps a2
     retw.n
 
 // void set_ps(uint32_t v)
@@ -91,7 +91,7 @@ get_ps:
 .type set_ps,@function
 .align 4
 set_ps:
-    wsr     a2, PS_SR
+    wsr.ps a2
     rsync
     retw.n
 

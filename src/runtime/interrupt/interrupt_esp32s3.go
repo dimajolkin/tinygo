@@ -9,7 +9,7 @@
 // Main differences from ESP-IDF:
 //   - Uses TinyGo's interrupt.New() instead of esp_intr_alloc()
 //   - Simplified PS register manipulation (no FPU/coprocessor state)
-//   - Call0 ABI conventions
+//   - Windowed ABI conventions (ESP32-S3)
 package interrupt
 
 import (
@@ -94,11 +94,8 @@ func SetPSIntLevel(level int) {
 	curLvl := cur & 0x0F
 
 	if lvl > curLvl {
-		// Raising mask: use RSIL to atomically set PS.INTLEVEL
-		// Note: RSIL only supports immediate values, so we use helpers for common levels
+		// Raising mask: use RSIL to atomically set PS.INTLEVEL when possible
 		switch lvl {
-		case 0:
-			rsil_0()
 		case 1:
 			rsil_1()
 		case 15:
@@ -128,21 +125,10 @@ func SetPSIntLevel(level int) {
 // SOURCE: Based on ESP-IDF portmacro.h portSET_INTERRUPT_MASK_FROM_ISR
 // ESP-IDF: components/freertos/FreeRTOS-Kernel-SMP/portable/xtensa/include/freertos/portmacro.h
 func Disable() (state State) {
-	// Use RSIL instruction: atomically read PS and set INTLEVEL=15
-	// This is equivalent to ESP-IDF's XTOS_SET_INTLEVEL(XCHAL_EXCM_LEVEL):
-	//   __asm__ __volatile__("rsil %0, 15\n" : "=a" (__tmp) : : "memory");
-	// RSIL reads old PS into result register and sets PS.INTLEVEL to immediate value
-
-	// DEBUG: Try manual implementation first
-	oldPS := get_ps()
-	newPS := (oldPS &^ 0x0F) | 15
-	set_ps(newPS)
-
-	// Extract and return only the INTLEVEL field (bits [3:0])
-	// This matches ESP-IDF's portSET_INTERRUPT_MASK() behavior:
-	//   prev_level = ((prev_level >> SHIFT) & MASK);
-	intlevel := (oldPS & 0x0F)
-	return State(intlevel)
+	// Atomically set INTLEVEL=15 and get old PS value
+	oldPS := rsil_15()
+	// Return previous INTLEVEL field only (bits [3:0])
+	return State(oldPS & 0x0F)
 }
 
 // Restore restores interrupts to what they were before. Give the previous state
@@ -331,8 +317,6 @@ func printHex32(val uint32) {
 
 //go:inline
 func callHandler(n int) {
-	// ESP32-S3 supports 32 CPU interrupt lines
-	// We need to dispatch to the appropriate handler
 	switch n {
 	case 0:
 		callHandlers(0)
@@ -398,6 +382,8 @@ func callHandler(n int) {
 		callHandlers(30)
 	case 31:
 		callHandlers(31)
+	default:
+		// unknown line, ignore
 	}
 }
 
