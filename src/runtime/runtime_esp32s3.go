@@ -49,6 +49,38 @@ var userExceptionVectorSymbol [0]byte
 //go:extern _isr_call_count
 var isrCallCount [1]uint32
 
+// Assembly helper functions from interrupt_helpers_esp32s3.S
+
+//go:extern read_interrupt
+func read_interrupt() uint32
+
+//go:extern read_intenable
+func read_intenable() uint32
+
+//go:extern write_intenable
+func write_intenable(v uint32)
+
+//go:extern write_intset
+func write_intset(v uint32)
+
+//go:extern write_intclear
+func write_intclear(v uint32)
+
+//go:extern get_ps
+func get_ps() uint32
+
+//go:extern set_ps
+func set_ps(v uint32)
+
+//go:extern rsil_0
+func rsil_0() uint32
+
+//go:extern rsil_1
+func rsil_1() uint32
+
+//go:extern rsil_15
+func rsil_15() uint32
+
 // Helper functions to get addresses from linker symbols
 // These are needed because direct access to symbols doesn't work reliably in TinyGo
 func getVectorBase() uintptr {
@@ -175,13 +207,13 @@ func main() {
 	}
 	print("\n")
 
-	//initSystimerTick()
+	initSystimerTick()
 
 	// ДИАГНОСТИКА: проверить что векторы действительно в IRAM
 	//checkVectorsInMemory()
 
 	// Test vector table first (isolated)
-	testInterruption()
+	//testInterruption()
 
 	// Initialize SYSTIMER for system tick
 
@@ -633,71 +665,9 @@ var swHandled int
 // Handler for software interrupt line 1 (used in testInterruption)
 func swInterruptHandler(_ interrupt.Interrupt) {
 	const swLine = 1
-	// Clear the CPU request bit (edge/software source)
-	device.AsmFull("wsr.intclear {v}", map[string]interface{}{"v": uintptr(1) << swLine})
-	device.AsmFull("rsync", nil)
+	// Clear the CPU request bit (edge/software source) using assembly helper
+	interrupt.WriteIntClear(1 << swLine)
 	swHandled++
-}
-
-func testInterruption() {
-	// Simple software-interrupt self-test (Level-1 style dispatch)
-	// Uses CPU interrupt line 1 (guaranteed Level-1) as a software/edge source.
-	const swLine = 1
-
-	println("\n=== IRQ SELF-TEST (SW INT on line 1, Level-1) ===")
-
-	swHandled = 0
-
-	// Register a handler for the chosen CPU line. Since this is a software/edge
-	// interrupt, we must clear the CPU request bit via INTCLEAR inside the handler.
-	intr := interrupt.New(swLine, swInterruptHandler)
-
-	// Enable the handler in TinyGo's table
-	intr.Enable()
-
-	// Enable the CPU interrupt bit in INTENABLE
-	ien := uintptr(device.AsmFull("rsr.intenable {}", nil))
-	ien |= uintptr(1) << swLine
-	device.AsmFull("wsr.intenable {v}", map[string]interface{}{"v": ien})
-	device.AsmFull("rsync", nil)
-
-	// Lower PS.INTLEVEL to allow all (unmask). If already low, this is a no-op.
-	interrupt.SetPSIntLevel(0)
-
-	before := interrupt.GetHandleInterruptCallCount()
-	println("IRQ: before, handleInterrupt=", before)
-
-	// Fire the software interrupt by setting the request bit
-	device.AsmFull("wsr.intset {v}", map[string]interface{}{"v": uintptr(1) << swLine})
-	device.AsmFull("rsync", nil)
-
-	// Busy-wait until the handler runs (or timeout)
-	for i := 0; i < 100000; i++ {
-		if swHandled > 0 {
-			break
-		}
-		device.Asm("nop")
-	}
-
-	after := interrupt.GetHandleInterruptCallCount()
-	println("IRQ: after, handleInterrupt=", after, " delta=", after-before, " handler calls=", swHandled)
-
-	if swHandled > 0 && (after-before) > 0 {
-		println("✓ SW interrupt line", swLine, "handled successfully")
-	} else {
-		println("✗ SW interrupt FAILED (no handler call)")
-		// Attempt cleanup anyway
-		device.AsmFull("wsr.intclear {v}", map[string]interface{}{"v": uintptr(1) << swLine})
-		device.AsmFull("rsync", nil)
-	}
-
-	// Disable this line in INTENABLE again to avoid spurious triggers later
-	ien = uintptr(device.AsmFull("rsr.intenable {}", nil))
-	ien &^= uintptr(1) << swLine
-	device.AsmFull("wsr.intenable {v}", map[string]interface{}{"v": ien})
-	device.AsmFull("rsync", nil)
-
-	println("=== IRQ SELF-TEST END ===\n")
 }
 
 func initSystimerTick() {
@@ -718,7 +688,16 @@ func initSystimerTick() {
 	}
 	println("SYST: SYSTIMER frequency: 16MHz, period:", tickPeriodNs, "ns =", periodTicks, "ticks")
 
+	// TEST: Verify ASM linking works
+	testVal := interrupt.TestAsmFunc()
+	println("SYST: TEST ASM function returned:", testVal, "(expected 42)")
+	if testVal != 42 {
+		println("SYST: ERROR - ASM linking failed!")
+		return
+	}
+
 	// Temporarily block interrupts during configuration
+	println("SYST: Before Disable()...")
 	old := interrupt.Disable()
 	println("SYST: After Disable(), old INTLEVEL=", uint32(old))
 

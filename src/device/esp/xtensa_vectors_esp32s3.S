@@ -95,6 +95,7 @@
 .extern _xt_unhandled_exception
 .extern _frxt_int_depth
 .extern _xt_user_exc
+.extern handleInterrupt
 
 /* Provide storage for interrupt counters */
 .section .bss._frxt_int_depth, "aw", @nobits

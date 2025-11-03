@@ -16,7 +16,49 @@ import (
 	"device"
 	"errors"
 	"math/bits"
+	_ "unsafe" // for go:linkname
 )
+
+// Assembly helper functions from interrupt_helpers_esp32s3.S
+// Using go:linkname to link to ASM symbols without package prefix
+
+//go:linkname read_interrupt read_interrupt
+func read_interrupt() uint32
+
+//go:linkname read_intenable read_intenable
+func read_intenable() uint32
+
+//go:linkname write_intenable write_intenable
+func write_intenable(v uint32)
+
+//go:linkname write_intset write_intset
+func write_intset(v uint32)
+
+//go:linkname write_intclear write_intclear
+func write_intclear(v uint32)
+
+//go:linkname get_ps get_ps
+func get_ps() uint32
+
+//go:linkname set_ps set_ps
+func set_ps(v uint32)
+
+//go:linkname rsil_0 rsil_0
+func rsil_0() uint32
+
+//go:linkname rsil_1 rsil_1
+func rsil_1() uint32
+
+//go:linkname rsil_15 rsil_15
+func rsil_15() uint32
+
+//go:linkname test_asm_func test_asm_func
+func test_asm_func() uint32
+
+// TestAsmFunc calls test_asm_func from ASM to verify linking
+func TestAsmFunc() uint32 {
+	return test_asm_func()
+}
 
 // State represents the previous INTLEVEL value (bits [3:0] of PS register on Xtensa).
 // We store only INTLEVEL, not the entire PS register, to avoid clobbering other PS bits
@@ -31,12 +73,9 @@ func (i Interrupt) Enable() error {
 	}
 
 	// Set INTENABLE bit for this interrupt line
-	mask := device.AsmFull("rsr.intenable {}", nil)
+	mask := read_intenable()
 	mask |= (1 << uint(i.num))
-	device.AsmFull("wsr.intenable {v}", map[string]interface{}{
-		"v": mask,
-	})
-	device.AsmFull("rsync", nil)
+	write_intenable(mask)
 
 	return nil
 }
@@ -57,20 +96,30 @@ func (i Interrupt) SetPriority(priority uint8) error {
 // Level 15 = all interrupts masked
 // WARNING: This is a low-level function. Prefer using Disable()/Restore()
 func SetPSIntLevel(level int) {
-	lvl := level & 0x0F
-	// Read current PS
-	cur := uintptr(device.AsmFull("rsr.ps {}", nil))
-	curLvl := int(cur & 0x0F)
+	lvl := uint32(level & 0x0F)
+	// Read current PS using assembly helper
+	cur := get_ps()
+	curLvl := cur & 0x0F
+
 	if lvl > curLvl {
 		// Raising mask: use RSIL to atomically set PS.INTLEVEL
-		// RSIL returns old PS into a temp, which we ignore here
-		device.AsmFull("rsil {}, {imm}", map[string]interface{}{"imm": lvl})
-		// No rsync required after RSIL (per ISA), but keep code symmetric
+		// Note: RSIL only supports immediate values, so we use helpers for common levels
+		switch lvl {
+		case 0:
+			rsil_0()
+		case 1:
+			rsil_1()
+		case 15:
+			rsil_15()
+		default:
+			// For other levels, modify PS directly
+			newPS := (cur &^ 0x0F) | lvl
+			set_ps(newPS)
+		}
 	} else if lvl != curLvl {
 		// Lowering mask: update PS keeping other bits
-		newPS := (cur &^ 0x0F) | uintptr(lvl)
-		device.AsmFull("wsr.ps {v}", map[string]interface{}{"v": newPS})
-		device.AsmFull("rsync", nil)
+		newPS := (cur &^ 0x0F) | lvl
+		set_ps(newPS)
 	}
 }
 
@@ -91,12 +140,16 @@ func Disable() (state State) {
 	// This is equivalent to ESP-IDF's XTOS_SET_INTLEVEL(XCHAL_EXCM_LEVEL):
 	//   __asm__ __volatile__("rsil %0, 15\n" : "=a" (__tmp) : : "memory");
 	// RSIL reads old PS into result register and sets PS.INTLEVEL to immediate value
-	ps := device.AsmFull("rsil {}, 15", nil)
+
+	// DEBUG: Try manual implementation first
+	oldPS := get_ps()
+	newPS := (oldPS &^ 0x0F) | 15
+	set_ps(newPS)
 
 	// Extract and return only the INTLEVEL field (bits [3:0])
 	// This matches ESP-IDF's portSET_INTERRUPT_MASK() behavior:
 	//   prev_level = ((prev_level >> SHIFT) & MASK);
-	intlevel := (uintptr(ps) & 0x0F)
+	intlevel := (oldPS & 0x0F)
 	return State(intlevel)
 }
 
@@ -109,26 +162,23 @@ func Disable() (state State) {
 // ESP-IDF: components/freertos/FreeRTOS-Kernel-SMP/portable/xtensa/include/freertos/portmacro.h
 func Restore(state State) {
 	// Read CURRENT PS register (it may have changed since Disable!)
-	currentPS := device.AsmFull("rsr.ps {}", nil)
+	currentPS := get_ps()
 
 	// Modify only the INTLEVEL field (bits [3:0]), preserve all other bits
 	// This matches ESP-IDF's portCLEAR_INTERRUPT_MASK() behavior:
 	//   ps_val = (ps_val & ~INTLEVEL_MASK) | prev_level;
-	newPS := (uintptr(currentPS) &^ 0x0F) | (uintptr(state) & 0x0F)
+	newPS := (currentPS &^ 0x0F) | (uint32(state) & 0x0F)
 
 	// Write back the modified PS register
-	device.AsmFull("wsr.ps {v}", map[string]interface{}{
-		"v": newPS,
-	})
-	device.AsmFull("rsync", nil)
+	set_ps(newPS)
 }
 
 // In returns whether the system is currently in an interrupt.
 // On Xtensa, we check if PS.EXCM bit is set (exception mode).
 func In() bool {
-	ps := device.AsmFull("rsr.ps {}", nil)
+	ps := get_ps()
 	// EXCM is bit 4 of PS register
-	return (uintptr(ps) & (1 << 4)) != 0
+	return (ps & (1 << 4)) != 0
 }
 
 // Adding pseudo function calls that is replaced by the compiler with the actual
@@ -143,16 +193,52 @@ var handleInterruptCallCount uint32
 // clearCpuInterrupt clears the CPU software/edge interrupt request bit.
 // For external level-sensitive sources, the peripheral's own flag must be cleared instead.
 func clearCpuInterrupt(intNum uint32) {
-	// INTCLEAR is SR #227 (write-only). device.AsmFull allows pseudo-name.
-	device.AsmFull("wsr.intclear {v}", map[string]interface{}{"v": uintptr(1) << intNum})
-	device.AsmFull("rsync", nil)
+	// INTCLEAR is SR #227 (write-only)
+	write_intclear(1 << intNum)
 }
 
 // pendingCPU returns the current pending CPU interrupts masked by INTENABLE.
 func pendingCPU() uint32 {
-	ien := uint32(device.AsmFull("rsr.intenable {}", nil))
-	req := uint32(device.AsmFull("rsr.interrupt {}", nil))
+	ien := read_intenable()
+	req := read_interrupt()
 	return ien & req
+}
+
+// Public helper functions for use in runtime code
+
+// ReadInterrupt returns current pending interrupt mask (INTERRUPT register)
+func ReadInterrupt() uint32 {
+	return read_interrupt()
+}
+
+// ReadIntEnable returns current interrupt enable mask (INTENABLE register)
+func ReadIntEnable() uint32 {
+	return read_intenable()
+}
+
+// WriteIntEnable writes interrupt enable mask (INTENABLE register)
+func WriteIntEnable(v uint32) {
+	write_intenable(v)
+}
+
+// WriteIntSet sets interrupt request bits (INTSET register)
+func WriteIntSet(v uint32) {
+	write_intset(v)
+}
+
+// WriteIntClear clears interrupt request bits (INTCLEAR register)
+func WriteIntClear(v uint32) {
+	write_intclear(v)
+}
+
+// GetPS returns current processor status (PS register)
+func GetPS() uint32 {
+	return get_ps()
+}
+
+// SetPS writes processor status (PS register)
+func SetPS(v uint32) {
+	set_ps(v)
 }
 
 // handleInterrupt - главный диспетчер прерываний для ESP32-S3 (ESP-IDF style)
