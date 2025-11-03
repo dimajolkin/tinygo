@@ -38,44 +38,73 @@ SECTIONS
          */
         
         /* UserException at +0x00 */
+        __user_vec_start = .;
         KEEP(*(.UserExceptionVector.text));
+        __user_vec_end = .;
+        ASSERT((__user_vec_end - __user_vec_start) <= 0x20, "UserException vector exceeds 32 bytes");
         . = _vector_base + 0x20;
-        
+
         /* DoubleException at +0x20 */
+        __double_vec_start = .;
         KEEP(*(.DoubleExceptionVector.text));
+        __double_vec_end = .;
+        ASSERT((__double_vec_end - __double_vec_start) <= 0x20, "DoubleException vector exceeds 32 bytes");
         . = _vector_base + 0x40;
-        
+
         /* KernelException at +0x40 */
+        __kernel_vec_start = .;
         KEEP(*(.KernelExceptionVector.text));
+        __kernel_vec_end = .;
+        ASSERT((__kernel_vec_end - __kernel_vec_start) <= 0x20, "KernelException vector exceeds 32 bytes");
         . = _vector_base + 0x60;
-        
+
         /* NMIException at +0x60 */
+        __nmi_vec_start = .;
         KEEP(*(.NMIExceptionVector.text));
+        __nmi_vec_end = .;
+        ASSERT((__nmi_vec_end - __nmi_vec_start) <= 0x20, "NMI vector exceeds 32 bytes");
         . = _vector_base + 0x80;
-        
+
         /* Level2Interrupt at +0x80 */
+        __lvl2_vec_start = .;
         KEEP(*(.Level2InterruptVector.text));
+        __lvl2_vec_end = .;
+        ASSERT((__lvl2_vec_end - __lvl2_vec_start) <= 0x20, "Level2 vector exceeds 32 bytes");
         . = _vector_base + 0xA0;
-        
+
         /* Level3Interrupt at +0xA0 */
+        __lvl3_vec_start = .;
         KEEP(*(.Level3InterruptVector.text));
+        __lvl3_vec_end = .;
+        ASSERT((__lvl3_vec_end - __lvl3_vec_start) <= 0x20, "Level3 vector exceeds 32 bytes");
         . = _vector_base + 0xC0;
-        
+
         /* Level4Interrupt at +0xC0 */
+        __lvl4_vec_start = .;
         KEEP(*(.Level4InterruptVector.text));
+        __lvl4_vec_end = .;
+        ASSERT((__lvl4_vec_end - __lvl4_vec_start) <= 0x20, "Level4 vector exceeds 32 bytes");
         . = _vector_base + 0xE0;
-        
+
         /* Level5Interrupt at +0xE0 */
+        __lvl5_vec_start = .;
         KEEP(*(.Level5InterruptVector.text));
+        __lvl5_vec_end = .;
+        ASSERT((__lvl5_vec_end - __lvl5_vec_start) <= 0x20, "Level5 vector exceeds 32 bytes");
         . = _vector_base + 0x100;
-        
+
         /* Level6Interrupt at +0x100 */
+        __lvl6_vec_start = .;
         KEEP(*(.Level6InterruptVector.text));
+        __lvl6_vec_end = .;
+        ASSERT((__lvl6_vec_end - __lvl6_vec_start) <= 0x20, "Level6 vector exceeds 32 bytes");
         . = _vector_base + 0x120;
-        
-        /* Level7Interrupt at +0x120 */
-        KEEP(*(.Level7InterruptVector.text));
-        . = _vector_base + 0x140;
+
+        /* DebugInterrupt at +0x120 */
+        __debug_vec_start = .;
+        KEEP(*(.DebugInterruptVector.text));
+        __debug_vec_end = .;
+        ASSERT((__debug_vec_end - __debug_vec_start) <= 0x20, "Debug vector exceeds 32 bytes");
         
         /* Set explicit boundary for vectors (ESP-IDF pattern)
          * Reserve 384 bytes for vectors:

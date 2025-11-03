@@ -175,10 +175,13 @@ func main() {
 	}
 	print("\n")
 
-	initSystimerTick()
+	//initSystimerTick()
 
 	// ДИАГНОСТИКА: проверить что векторы действительно в IRAM
 	//checkVectorsInMemory()
+
+	// Test vector table first (isolated)
+	testInterruption()
 
 	// Initialize SYSTIMER for system tick
 
@@ -622,6 +625,81 @@ var _ebss [0]byte
 //   - esp-idf/components/hal/systimer_hal.c
 //   - esp-idf/components/hal/esp32s3/include/hal/systimer_ll.h
 //   - esp-idf/components/soc/esp32s3/include/soc/systimer_struct.h
+//
+// testInterruption - изолированный тест векторной таблицы через программное прерывание
+// Global counter for testInterruption handler (cannot use closure in interrupt handlers)
+var swHandled int
+
+// Handler for software interrupt line 1 (used in testInterruption)
+func swInterruptHandler(_ interrupt.Interrupt) {
+	const swLine = 1
+	// Clear the CPU request bit (edge/software source)
+	device.AsmFull("wsr.intclear {v}", map[string]interface{}{"v": uintptr(1) << swLine})
+	device.AsmFull("rsync", nil)
+	swHandled++
+}
+
+func testInterruption() {
+	// Simple software-interrupt self-test (Level-1 style dispatch)
+	// Uses CPU interrupt line 1 (guaranteed Level-1) as a software/edge source.
+	const swLine = 1
+
+	println("\n=== IRQ SELF-TEST (SW INT on line 1, Level-1) ===")
+
+	swHandled = 0
+
+	// Register a handler for the chosen CPU line. Since this is a software/edge
+	// interrupt, we must clear the CPU request bit via INTCLEAR inside the handler.
+	intr := interrupt.New(swLine, swInterruptHandler)
+
+	// Enable the handler in TinyGo's table
+	intr.Enable()
+
+	// Enable the CPU interrupt bit in INTENABLE
+	ien := uintptr(device.AsmFull("rsr.intenable {}", nil))
+	ien |= uintptr(1) << swLine
+	device.AsmFull("wsr.intenable {v}", map[string]interface{}{"v": ien})
+	device.AsmFull("rsync", nil)
+
+	// Lower PS.INTLEVEL to allow all (unmask). If already low, this is a no-op.
+	interrupt.SetPSIntLevel(0)
+
+	before := interrupt.GetHandleInterruptCallCount()
+	println("IRQ: before, handleInterrupt=", before)
+
+	// Fire the software interrupt by setting the request bit
+	device.AsmFull("wsr.intset {v}", map[string]interface{}{"v": uintptr(1) << swLine})
+	device.AsmFull("rsync", nil)
+
+	// Busy-wait until the handler runs (or timeout)
+	for i := 0; i < 100000; i++ {
+		if swHandled > 0 {
+			break
+		}
+		device.Asm("nop")
+	}
+
+	after := interrupt.GetHandleInterruptCallCount()
+	println("IRQ: after, handleInterrupt=", after, " delta=", after-before, " handler calls=", swHandled)
+
+	if swHandled > 0 && (after-before) > 0 {
+		println("✓ SW interrupt line", swLine, "handled successfully")
+	} else {
+		println("✗ SW interrupt FAILED (no handler call)")
+		// Attempt cleanup anyway
+		device.AsmFull("wsr.intclear {v}", map[string]interface{}{"v": uintptr(1) << swLine})
+		device.AsmFull("rsync", nil)
+	}
+
+	// Disable this line in INTENABLE again to avoid spurious triggers later
+	ien = uintptr(device.AsmFull("rsr.intenable {}", nil))
+	ien &^= uintptr(1) << swLine
+	device.AsmFull("wsr.intenable {v}", map[string]interface{}{"v": ien})
+	device.AsmFull("rsync", nil)
+
+	println("=== IRQ SELF-TEST END ===\n")
+}
+
 func initSystimerTick() {
 	// SYSTIMER clock frequency for ESP32-S3
 	// ESP-IDF: systimer_ll_get_counter_clock_src() returns 16MHz

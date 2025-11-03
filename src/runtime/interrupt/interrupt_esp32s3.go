@@ -14,14 +14,65 @@ package interrupt
 
 import (
 	"device"
-	"device/esp"
 	"errors"
+	"math/bits"
 )
 
 // State represents the previous INTLEVEL value (bits [3:0] of PS register on Xtensa).
 // We store only INTLEVEL, not the entire PS register, to avoid clobbering other PS bits
 // that may have changed between Disable() and Restore() (like CALLINC, WOE, etc.)
 type State uintptr
+
+// Enable enables this interrupt. Right after calling this function, the
+// interrupt may be invoked if it was already pending.
+func (i Interrupt) Enable() error {
+	if i.num < 0 || i.num > 31 {
+		return errors.New("interrupt number out of range [0-31]")
+	}
+
+	// Set INTENABLE bit for this interrupt line
+	mask := device.AsmFull("rsr.intenable {}", nil)
+	mask |= (1 << uint(i.num))
+	device.AsmFull("wsr.intenable {v}", map[string]interface{}{
+		"v": mask,
+	})
+	device.AsmFull("rsync", nil)
+
+	return nil
+}
+
+// SetPriority sets the interrupt priority for this interrupt.
+// A lower number means a higher priority.
+// Xtensa ESP32-S3 supports interrupt levels 1-7.
+func (i Interrupt) SetPriority(priority uint8) error {
+	// On Xtensa, priority is controlled by interrupt level (1-7)
+	// and by CPU INTLEVEL in PS register.
+	// This is a placeholder - actual implementation would need
+	// to configure interrupt routing through Interrupt Matrix.
+	return nil
+}
+
+// SetPSIntLevel sets PS.INTLEVEL to the given level (0..15)
+// Level 0 = all interrupts enabled
+// Level 15 = all interrupts masked
+// WARNING: This is a low-level function. Prefer using Disable()/Restore()
+func SetPSIntLevel(level int) {
+	lvl := level & 0x0F
+	// Read current PS
+	cur := uintptr(device.AsmFull("rsr.ps {}", nil))
+	curLvl := int(cur & 0x0F)
+	if lvl > curLvl {
+		// Raising mask: use RSIL to atomically set PS.INTLEVEL
+		// RSIL returns old PS into a temp, which we ignore here
+		device.AsmFull("rsil {}, {imm}", map[string]interface{}{"imm": lvl})
+		// No rsync required after RSIL (per ISA), but keep code symmetric
+	} else if lvl != curLvl {
+		// Lowering mask: update PS keeping other bits
+		newPS := (cur &^ 0x0F) | uintptr(lvl)
+		device.AsmFull("wsr.ps {v}", map[string]interface{}{"v": newPS})
+		device.AsmFull("rsync", nil)
+	}
+}
 
 // Disable disables all interrupts and returns the previous interrupt state. It
 // can be used in a critical section like this:
@@ -89,32 +140,83 @@ func callHandlers(num int)
 // Debug counter for handleInterrupt calls
 var handleInterruptCallCount uint32
 
+// clearCpuInterrupt clears the CPU software/edge interrupt request bit.
+// For external level-sensitive sources, the peripheral's own flag must be cleared instead.
+func clearCpuInterrupt(intNum uint32) {
+	// INTCLEAR is SR #227 (write-only). device.AsmFull allows pseudo-name.
+	device.AsmFull("wsr.intclear {v}", map[string]interface{}{"v": uintptr(1) << intNum})
+	device.AsmFull("rsync", nil)
+}
+
+// pendingCPU returns the current pending CPU interrupts masked by INTENABLE.
+func pendingCPU() uint32 {
+	ien := uint32(device.AsmFull("rsr.intenable {}", nil))
+	req := uint32(device.AsmFull("rsr.interrupt {}", nil))
+	return ien & req
+}
+
 // handleInterrupt - главный диспетчер прерываний для ESP32-S3 (ESP-IDF style)
-// Вызывается из ассемблерного кода _xt_level1_int_handler_entry
+// Вызывается напрямую из ассемблерного Level-1 вектора (_xt_lowint1)
 //
-// Parameters:
+// NO PARAMETERS: диспетчер сам читает INTERRUPT & INTENABLE и обрабатывает все pending биты
 //
-//	intNum - CPU interrupt line number (0-31) passed in a2 register
+// NOTE:
+//   - The CPU *request* bit is NOT automatically cleared by hardware when taking the interrupt.
+//   - Handler MUST deassert the source: for level-sensitive sources — clear peripheral flag; for edge/software — write INTCLEAR for the CPU line.
 //
-// NOTE: CPU interrupt already cleared by ASM (wsr.intclear) before this is called!
-// This handler must clear peripheral interrupt flag (e.g. SYSTIMER.INT_CLR)
+// Example usage:
+//
+//	package main
+//
+//	import (
+//		"device/esp"
+//		"machine/interrupt"
+//	)
+//
+//	func onTimerInterrupt(interrupt.Interrupt) {
+//		// Clear the peripheral interrupt source (level-sensitive)
+//		esp.SYSTIMER.INT_CLR.Set(1 << 0)
+//		// Perform periodic task
+//	}
+//
+//	func main() {
+//		// Initialize SYSTIMER or peripheral
+//		// Configure and enable interrupt line 23 (SYSTIMER)
+//		intr := interrupt.New(23, onTimerInterrupt)
+//		intr.Enable()
+//		// Start timer and enable target 0 compare event
+//		esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(1)
+//		for {
+//			device.Asm("waiti 0") // Sleep until next interrupt
+//		}
+//	}
+//
+// This demonstrates a level-sensitive interrupt (SYSTIMER). The handler must
+// clear its peripheral flag to avoid retriggering. For edge/software interrupts,
+// call clearCpuInterrupt(n) instead.
 //
 //export handleInterrupt
-func handleInterrupt(intNum uint32) {
+func handleInterrupt() {
 	// Increment counter
 	handleInterruptCallCount++
 
-	// Handle interrupt 23 (SYSTIMER)
-	if intNum == 23 {
-		// Safety: Stop timer after 5 calls during testing
-		esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(0) // Stop timer
-
-		// Clear SYSTIMER peripheral interrupt flag
-		// This is the peripheral source - must clear it or interrupt will re-trigger!
-		esp.SYSTIMER.INT_CLR.Set(1 << 0)
-		// TODO: Call registered handler via callHandler(int(intNum))
+	// Generic Level-1 dispatcher per ISA: service all currently pending & enabled bits.
+	// We recompute the mask each iteration to catch new arrivals during servicing.
+	for tries := 0; tries < 8; tries++ { // simple bound to avoid livelock in case of flapping sources
+		pend := pendingCPU()
+		if pend == 0 {
+			break
+		}
+		// Find lowest set bit using bits.TrailingZeros32
+		bit := uint32(bits.TrailingZeros32(pend))
+		if bit < 32 {
+			// Call registered handler; peripheral handler must clear its own flag
+			// For SW/edge sources, handler may call clearCpuInterrupt(bit)
+			callHandler(int(bit))
+		} else {
+			break
+		}
 	}
-	// TODO: Handle other interrupt lines by looking up in interrupt table
 }
 
 //export handleException
@@ -219,68 +321,6 @@ func callHandler(n int) {
 	case 31:
 		callHandlers(31)
 	}
-}
-
-// Enable enables this interrupt. Right after calling this function, the
-// interrupt may be invoked if it was already pending.
-func (i Interrupt) Enable() error {
-	if i.num < 0 || i.num > 31 {
-		return errors.New("interrupt number out of range [0-31]")
-	}
-
-	// Set INTENABLE bit for this interrupt line
-	mask := device.AsmFull("rsr.intenable {}", nil)
-	mask |= (1 << uint(i.num))
-	device.AsmFull("wsr.intenable {v}", map[string]interface{}{
-		"v": mask,
-	})
-	device.AsmFull("rsync", nil)
-
-	return nil
-}
-
-// Disable disables this interrupt.
-func (i Interrupt) Disable() error {
-	if i.num < 0 || i.num > 31 {
-		return errors.New("interrupt number out of range [0-31]")
-	}
-
-	// Clear INTENABLE bit for this interrupt line
-	mask := device.AsmFull("rsr.intenable {}", nil)
-	mask &^= (1 << uint(i.num))
-	device.AsmFull("wsr.intenable {v}", map[string]interface{}{
-		"v": mask,
-	})
-	device.AsmFull("rsync", nil)
-
-	return nil
-}
-
-// SetPriority sets the interrupt priority for this interrupt.
-// A lower number means a higher priority.
-// Xtensa ESP32-S3 supports interrupt levels 1-7.
-func (i Interrupt) SetPriority(priority uint8) error {
-	// On Xtensa, priority is controlled by interrupt level (1-7)
-	// and by CPU INTLEVEL in PS register.
-	// This is a placeholder - actual implementation would need
-	// to configure interrupt routing through Interrupt Matrix.
-	return nil
-}
-
-// SetPSIntLevel sets PS.INTLEVEL to the given level (0..15)
-// Level 0 = all interrupts enabled
-// Level 15 = all interrupts masked
-// WARNING: This is a low-level function. Prefer using Disable()/Restore()
-func SetPSIntLevel(level int) {
-	// Read current PS
-	oldPs := device.AsmFull("rsr.ps {}", nil)
-	// Modify PS.INTLEVEL field (bits [3:0])
-	ps := oldPs
-	ps &^= 0x0F                 // Clear INTLEVEL bits
-	ps |= uintptr(level & 0x0F) // Set new INTLEVEL
-	// Write new PS and sync
-	device.AsmFull("wsr.ps {v}", map[string]interface{}{"v": ps})
-	device.AsmFull("rsync", nil)
 }
 
 // GetHandleInterruptCallCount returns the number of times handleInterrupt was called.

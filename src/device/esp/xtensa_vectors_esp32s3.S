@@ -103,6 +103,13 @@
 _frxt_int_depth:
     .space 4
 
+/* Provide a simple ISR call counter storage (optional) */
+.section .bss._isr_call_count, "aw", @nobits
+.align 4
+.global _isr_call_count
+_isr_call_count:
+    .space 4
+
 
 /*
  * User Exception Vector (Level-1) - handles all Level-1 interrupts and exceptions
@@ -127,11 +134,9 @@ _UserExceptionVector:
 .type _xt_user_exc,@function
 _xt_user_exc:
     /* Check if this is a Level-1 interrupt (EXCCAUSE == 4) */
-    rsr     a0, EXCSAVE_1                   /* restore a0 from EXCSAVE_1 */
-    wsr     a2, EXCSAVE_1                   /* save a2 temporarily */
-    rsr     a2, EXCCAUSE                    /* read EXCCAUSE into a2 */
-    bnei    a2, 4, _xt_to_unhandled_exc     /* if not level1 interrupt, jump to trampoline */
-    rsr     a2, EXCSAVE_1                   /* restore a2 */
+    rsr     a0, EXCSAVE_1                   /* restore a0 saved by vector entry */
+    rsr     a3, EXCCAUSE                    /* read EXCCAUSE into a3 */
+    bnei    a3, 4, _xt_to_unhandled_exc     /* not Level-1 interrupt? go to exception handler */
     j       _xt_lowint1                     /* EXPLICIT jump to _xt_lowint1! */
 
 /* Trampoline for unhandled exception (must be close for bnei) */
@@ -139,21 +144,80 @@ _xt_user_exc:
 _xt_to_unhandled_exc:
     call0   _xt_unhandled_exception         /* long jump to real handler */
 
-/* Low-level level-1 interrupt entry: create stack frame and dispatch */
+/* Low-level level-1 interrupt entry: call Go dispatcher directly */
 .align 4
 .global _xt_lowint1
 _xt_lowint1:
-    /* ABSOLUTE MINIMAL inline ISR - just clear and return! */
-    wsr     a0, EXCSAVE_1                   /* save a0 */
+    /* At entry: a0 saved in EXCSAVE_1 by _UserExceptionVector */
+
+    /* Allocate 64-byte stack frame (16 slots * 4 bytes, 16-byte aligned) */
+    addi    sp, sp, -64
+
+    /* Save a0-a3 (a0 from EXCSAVE_1) */
+    rsr     a2, EXCSAVE_1                   /* a2 = original a0 */
+    s32i    a2, sp, 0                       /* save original a0 */
+    s32i    a1, sp, 4                       /* save a1 (sp already adjusted) */
+    s32i    a2, sp, 8                       /* save a2 (we're using it as temp) */
+    s32i    a3, sp, 12                      /* save a3 */
     
-    /* Clear CPU interrupt line 1 */
-    movi    a0, 0x2                         /* 1 << 1 */
-    wsr.intclear a0
-    rsync
+    /* Save a4-a15 (might be used by Go) */
+    s32i    a4, sp, 16
+    s32i    a5, sp, 20
+    s32i    a6, sp, 24
+    s32i    a7, sp, 28
+    s32i    a8, sp, 32
+    s32i    a9, sp, 36
+    s32i    a10, sp, 40
+    s32i    a11, sp, 44
+    s32i    a12, sp, 48
+    s32i    a13, sp, 52
+    s32i    a14, sp, 56
+    s32i    a15, sp, 60
+
+    /* Increment ISR counter */
+    .literal_position
+    l32r    a2, .Lisr_count_addr
+    l32i    a3, a2, 0
+    addi    a3, a3, 1
+    s32i    a3, a2, 0
+
+    /* Call Go dispatcher: handleInterrupt reads INTERRUPT & INTENABLE itself */
+    .literal_position
+    l32r    a0, .LhandleInterrupt_addr
+    callx0  a0                              /* call handleInterrupt() */
+
+    /* Restore a4-a15 */
+    l32i    a15, sp, 60
+    l32i    a14, sp, 56
+    l32i    a13, sp, 52
+    l32i    a12, sp, 48
+    l32i    a11, sp, 44
+    l32i    a10, sp, 40
+    l32i    a9, sp, 36
+    l32i    a8, sp, 32
+    l32i    a7, sp, 28
+    l32i    a6, sp, 24
+    l32i    a5, sp, 20
+    l32i    a4, sp, 16
+
+    /* Restore a0-a3 */
+    l32i    a3, sp, 12
+    l32i    a2, sp, 8
+    l32i    a1, sp, 4
+    l32i    a0, sp, 0
+
+    /* Deallocate stack frame */
+    addi    sp, sp, 64
     
-    /* Restore a0 and return */
-    rsr     a0, EXCSAVE_1
+    /* Return from exception */
     rfe
+
+/* Literal pool for _xt_lowint1 */
+.align 4
+.Lisr_count_addr:
+    .word _isr_call_count
+.LhandleInterrupt_addr:
+    .word handleInterrupt
 
 .global _xt_user_exit
 _xt_user_exit:

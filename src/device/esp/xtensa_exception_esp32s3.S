@@ -39,12 +39,7 @@
     sub     \ad, \at, \as   // get numbering from lsbit (0..31, -1 if absent)
 .endm
 
-// Global ISR call counter in .data section
-.section .data
-.align 4
-.global _isr_call_count
-_isr_call_count:
-    .word 0
+// Note: _isr_call_count is defined in xtensa_vectors_esp32s3.S (.bss section)
 
 /*
  * _frxt_int_enter - Вход в обработчик прерывания
