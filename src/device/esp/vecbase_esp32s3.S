@@ -29,23 +29,23 @@ runtime.setVecbaseToVectorBase:
     or      a4, a4, a5                  // Combine: a4 = 0x40374000
     
     // Save current PS register
-    rsr     a3, PS
-    
+    rsr.ps  a3
+
     // Disable all interrupts (set INTLEVEL=15, keep other bits)
     movi    a2, ~0x0F                   // Mask to clear INTLEVEL bits
     and     a2, a3, a2                  // Clear INTLEVEL
     movi    a5, 15                      // INTLEVEL = 15 (mask all)
     or      a2, a2, a5
-    wsr     a2, PS
+    wsr.ps  a2
     rsync
-    
+
     // Now it's safe to change VECBASE
     mov     a2, a4                      // a2 = 0x40374000
-    wsr     a2, VECBASE                 // VECBASE = a2
-    rsync                               // synchronize
-    
+    wsr.vecbase a2                      // VECBASE = a2
+    isync                               // synchronize instruction stream after VECBASE change
+
     // Restore original PS (re-enable interrupts to previous level)
-    wsr     a3, PS
+    wsr.ps  a3
     rsync
     
     ret                                 // return (Call0 ABI)

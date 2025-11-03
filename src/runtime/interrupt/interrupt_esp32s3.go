@@ -22,34 +22,34 @@ import (
 // Assembly helper functions from interrupt_helpers_esp32s3.S
 // Using go:linkname to link to ASM symbols without package prefix
 
-//go:linkname read_interrupt read_interrupt
+//go:linkname read_interrupt __tg_read_interrupt
 func read_interrupt() uint32
 
-//go:linkname read_intenable read_intenable
+//go:linkname read_intenable __tg_read_intenable
 func read_intenable() uint32
 
-//go:linkname write_intenable write_intenable
+//go:linkname write_intenable __tg_write_intenable
 func write_intenable(v uint32)
 
-//go:linkname write_intset write_intset
+//go:linkname write_intset __tg_write_intset
 func write_intset(v uint32)
 
-//go:linkname write_intclear write_intclear
+//go:linkname write_intclear __tg_write_intclear
 func write_intclear(v uint32)
 
-//go:linkname get_ps get_ps
+//go:linkname get_ps __tg_get_ps
 func get_ps() uint32
 
-//go:linkname set_ps set_ps
+//go:linkname set_ps __tg_set_ps
 func set_ps(v uint32)
 
-//go:linkname rsil_0 rsil_0
+//go:linkname rsil_0 __tg_rsil_0
 func rsil_0() uint32
 
-//go:linkname rsil_1 rsil_1
+//go:linkname rsil_1 __tg_rsil_1
 func rsil_1() uint32
 
-//go:linkname rsil_15 rsil_15
+//go:linkname rsil_15 __tg_rsil_15
 func rsil_15() uint32
 
 // State represents the previous INTLEVEL value (bits [3:0] of PS register on Xtensa).
@@ -136,19 +136,38 @@ func Disable() (state State) {
 // calling Disable, this will not re-enable interrupts, allowing for nested
 // critical sections.
 //
-// SOURCE: Based on ESP-IDF portmacro.h portCLEAR_INTERRUPT_MASK_FROM_ISR
-// ESP-IDF: components/freertos/FreeRTOS-Kernel-SMP/portable/xtensa/include/freertos/portmacro.h
+// This implementation ensures INTLEVEL is restored even if a direct PS write is ignored,
+// by falling back to RSIL-based sequences.
 func Restore(state State) {
-	// Read CURRENT PS register (it may have changed since Disable!)
-	currentPS := get_ps()
-
-	// Modify only the INTLEVEL field (bits [3:0]), preserve all other bits
-	// This matches ESP-IDF's portCLEAR_INTERRUPT_MASK() behavior:
-	//   ps_val = (ps_val & ~INTLEVEL_MASK) | prev_level;
-	newPS := (currentPS &^ 0x0F) | (uint32(state) & 0x0F)
-
-	// Write back the modified PS register
-	set_ps(newPS)
+	// Target INTLEVEL we want to restore
+	target := uint32(state) & 0x0F
+	// Read current PS
+	curPS := get_ps()
+	cur := curPS & 0x0F
+	if target == cur {
+		return
+	}
+	if target > cur {
+		// Raising mask: prefer atomic RSIL for known immediates
+		switch target {
+		case 1:
+			rsil_1()
+		case 15:
+			rsil_15()
+		default:
+			set_ps((curPS &^ 0x0F) | target)
+		}
+		return
+	}
+	// Lowering mask: write PS; if it does not stick (some environments), force via rsil_0 then set target.
+	set_ps((curPS &^ 0x0F) | target)
+	if (get_ps() & 0x0F) != target {
+		// Forcefully unmask to level 0 and then set desired
+		rsil_0()
+		if target != 0 {
+			set_ps((get_ps() &^ 0x0F) | target)
+		}
+	}
 }
 
 // In returns whether the system is currently in an interrupt.
@@ -218,6 +237,9 @@ func GetPS() uint32 {
 func SetPS(v uint32) {
 	set_ps(v)
 }
+
+// --- SYSTIMER/INTERRUPT register access checks for ESP32-S3 ---
+// Inserted for hardware debug/validation in runtime_esp32s3.go
 
 // handleInterrupt - главный диспетчер прерываний для ESP32-S3 (ESP-IDF style)
 // Вызывается напрямую из ассемблерного Level-1 вектора (_xt_lowint1)

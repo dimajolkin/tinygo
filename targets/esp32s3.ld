@@ -32,92 +32,104 @@ SECTIONS
     {
         _vectors_flash_start = LOADADDR(.vectors);
 
-        /* ESP32-S3 Call0 ABI Vector Table Layout (from Xtensa ISA)
-         * Each vector at fixed 32-byte (0x20) offset from VECBASE
-         * Based on ESP-IDF esp_system/ld/esp32s3/sections.ld.in
+        /* Xtensa LX7/ESP32-S3 Vector Table (Call0 ABI)
+         * Offsets relative to VECBASE as per TRM/ESP-IDF:
+         *   0x000 : Reset vector (placeholder)
+         *   0x040 : Kernel exception
+         *   0x060 : NMI exception
+         *   0x080 : Level-2 interrupt
+         *   0x0A0 : Level-3 interrupt
+         *   0x0C0 : Level-4 interrupt
+         *   0x0E0 : Level-5 interrupt
+         *   0x100 : Level-6 interrupt
+         *   0x120 : Level-7 interrupt (Debug)
+         *   0x180 : **User exception / Level-1** (must be here for IRQ level-1)
+         *   0x1C0 : Double exception
          */
-        
-        /* UserException at +0x00 */
-        __user_vec_start = .;
-        KEEP(*(.UserExceptionVector.text));
-        __user_vec_end = .;
-        ASSERT((__user_vec_end - __user_vec_start) <= 0x20, "UserException vector exceeds 32 bytes");
-        . = _vector_base + 0x20;
 
-        /* DoubleException at +0x20 */
-        __double_vec_start = .;
-        KEEP(*(.DoubleExceptionVector.text));
-        __double_vec_end = .;
-        ASSERT((__double_vec_end - __double_vec_start) <= 0x20, "DoubleException vector exceeds 32 bytes");
-        . = _vector_base + 0x40;
+        /* Reset (placeholder) at +0x000 */
+        . = _vector_base + 0x000;
+        __reset_vec_start = .;
+        KEEP(*(.ResetVector.text))
+        __reset_vec_end = .;
+        /* If no reset vector provided, ensure space is reserved */
+        . = ALIGN(0x20);
 
-        /* KernelException at +0x40 */
+        /* KernelException at +0x040 */
+        . = _vector_base + 0x040;
         __kernel_vec_start = .;
         KEEP(*(.KernelExceptionVector.text));
         __kernel_vec_end = .;
         ASSERT((__kernel_vec_end - __kernel_vec_start) <= 0x20, "KernelException vector exceeds 32 bytes");
-        . = _vector_base + 0x60;
 
-        /* NMIException at +0x60 */
+        /* NMIException at +0x060 */
+        . = _vector_base + 0x060;
         __nmi_vec_start = .;
         KEEP(*(.NMIExceptionVector.text));
         __nmi_vec_end = .;
         ASSERT((__nmi_vec_end - __nmi_vec_start) <= 0x20, "NMI vector exceeds 32 bytes");
-        . = _vector_base + 0x80;
 
-        /* Level2Interrupt at +0x80 */
+        /* Level2Interrupt at +0x080 */
+        . = _vector_base + 0x080;
         __lvl2_vec_start = .;
         KEEP(*(.Level2InterruptVector.text));
         __lvl2_vec_end = .;
         ASSERT((__lvl2_vec_end - __lvl2_vec_start) <= 0x20, "Level2 vector exceeds 32 bytes");
-        . = _vector_base + 0xA0;
 
-        /* Level3Interrupt at +0xA0 */
+        /* Level3Interrupt at +0x0A0 */
+        . = _vector_base + 0x0A0;
         __lvl3_vec_start = .;
         KEEP(*(.Level3InterruptVector.text));
         __lvl3_vec_end = .;
         ASSERT((__lvl3_vec_end - __lvl3_vec_start) <= 0x20, "Level3 vector exceeds 32 bytes");
-        . = _vector_base + 0xC0;
 
-        /* Level4Interrupt at +0xC0 */
+        /* Level4Interrupt at +0x0C0 */
+        . = _vector_base + 0x0C0;
         __lvl4_vec_start = .;
         KEEP(*(.Level4InterruptVector.text));
         __lvl4_vec_end = .;
         ASSERT((__lvl4_vec_end - __lvl4_vec_start) <= 0x20, "Level4 vector exceeds 32 bytes");
-        . = _vector_base + 0xE0;
 
-        /* Level5Interrupt at +0xE0 */
+        /* Level5Interrupt at +0x0E0 */
+        . = _vector_base + 0x0E0;
         __lvl5_vec_start = .;
         KEEP(*(.Level5InterruptVector.text));
         __lvl5_vec_end = .;
         ASSERT((__lvl5_vec_end - __lvl5_vec_start) <= 0x20, "Level5 vector exceeds 32 bytes");
-        . = _vector_base + 0x100;
 
         /* Level6Interrupt at +0x100 */
+        . = _vector_base + 0x100;
         __lvl6_vec_start = .;
         KEEP(*(.Level6InterruptVector.text));
         __lvl6_vec_end = .;
         ASSERT((__lvl6_vec_end - __lvl6_vec_start) <= 0x20, "Level6 vector exceeds 32 bytes");
-        . = _vector_base + 0x120;
 
-        /* DebugInterrupt at +0x120 */
+        /* Level7/Debug at +0x120 */
+        . = _vector_base + 0x120;
         __debug_vec_start = .;
         KEEP(*(.DebugInterruptVector.text));
         __debug_vec_end = .;
         ASSERT((__debug_vec_end - __debug_vec_start) <= 0x20, "Debug vector exceeds 32 bytes");
-        
-        /* Set explicit boundary for vectors (ESP-IDF pattern)
-         * Reserve 384 bytes for vectors:
-         * - 10 vectors × 32 bytes = 320 bytes
-         * - 64 bytes for alignment and safety margin
-         */
+
+        /* UserException (Level-1) at +0x180 — CRITICAL for IRQ delivery */
         . = _vector_base + 0x180;
-        
+        __user_vec_start = .;
+        KEEP(*(.UserExceptionVector.text));
+        __user_vec_end = .;
+        ASSERT((__user_vec_end - __user_vec_start) <= 0x20, "UserException vector exceeds 32 bytes");
+
+        /* DoubleException at +0x1C0 */
+        . = _vector_base + 0x1C0;
+        __double_vec_start = .;
+        KEEP(*(.DoubleExceptionVector.text));
+        __double_vec_end = .;
+        ASSERT((__double_vec_end - __double_vec_start) <= 0x20, "DoubleException vector exceeds 32 bytes");
+
         /* Collect ALL vector literals AFTER the vector code (ESP-IDF style) */
         . = ALIGN(4);
         *(.*Vector.literal)
-        
-        /* Mark end of vectors section */
+
+        /* Mark end of vectors section and compute flash size */
         . = ALIGN(16);
         _vectors_end = .;
         _vectors_flash_end = _vectors_flash_start + SIZEOF(.vectors);

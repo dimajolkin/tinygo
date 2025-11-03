@@ -175,10 +175,9 @@ func main() {
 	}
 	print("\n")
 
-	initSystimerTick()
+	checkVectorsInMemory()
 
-	// ДИАГНОСТИКА: проверить что векторы действительно в IRAM
-	//checkVectorsInMemory()
+	initSystimerTick()
 
 	// Test vector table first (isolated)
 	//testInterruption()
@@ -337,26 +336,21 @@ func abort() {
 	}
 }
 
-// checkVectorsInMemory проверяет, что векторы действительно скопированы в IRAM
-// и показывает подробную информацию о векторной таблице
 func checkVectorsInMemory() {
 	println("\n=== VECTOR TABLE MEMORY CHECK ===")
 
-	// ТЕСТ: Сравнить с _sbss и _ebss - они ТОЧНО работают!
+	// Known-good BSS anchors (sanity that symbols resolve)
 	sbssAddr := uintptr(unsafe.Pointer(&_sbss))
 	ebssAddr := uintptr(unsafe.Pointer(&_ebss))
 	println("_sbss address (decimal):", uint32(sbssAddr))
 	println("_ebss address (decimal):", uint32(ebssAddr))
 
-	// Получить адрес _vector_base
+	// Vector base from linker vs CPU register
 	vectorBaseAddr := getVectorBase()
-	println("_vector_base address (decimal):", uint32(vectorBaseAddr))
-
-	// Получить текущий VECBASE из регистра
 	vecbase := device.AsmFull("rsr.vecbase {}", nil)
+	println("_vector_base address (decimal):", uint32(vectorBaseAddr))
 	println("VECBASE register (decimal):", uint32(uintptr(vecbase)))
 
-	// Выводим в hex формате используя printptr()
 	print("_sbss hex: ")
 	printptr(sbssAddr)
 	println()
@@ -370,221 +364,129 @@ func checkVectorsInMemory() {
 	printptr(uintptr(vecbase))
 	println()
 
-	// Проверить что адреса совпадают
 	if vectorBaseAddr == uintptr(vecbase) {
-		println("✓ VECBASE correctly points to _vector_base")
+		println("\u2713 VECBASE correctly points to _vector_base")
 	} else {
-		println("✗ ERROR: VECBASE mismatch!")
+		println("\u2717 ERROR: VECBASE mismatch!")
 	}
 
-	// Прочитать векторную таблицу (расширенный вывод по уровням)
-	println("\n=== VECTOR TABLE CONTENTS (BY LEVEL) ===")
-	ptr := (*[80]uint32)(unsafe.Pointer(vectorBaseAddr))
-
-	// UserExceptionVector (0x00) - Level-1
-	println("\n[1] UserExceptionVector (Level-1) at offset 0x00:")
-	for i := 0; i < 8; i++ {
-		val := ptr[i]
-		offset := i * 4
-		print("  +0x")
-		if offset < 0x10 {
-			print("0")
+	// Helper to read a 32-bit word; returns (val, ok)
+	read32 := func(addr uintptr) (uint32, bool) {
+		if addr == 0 {
+			return 0, false
 		}
-		print(offset)
+		return *(*uint32)(unsafe.Pointer(addr)), true
+	}
+
+	println("\n=== VECTOR TABLE CONTENTS (BY LEVEL) ===\n")
+
+	base := vectorBaseAddr
+
+	// Offsets per ESP32-S3 TRM / ESP-IDF (Xtensa LX7, Call0 ABI)
+	const (
+		offKernel = 0x040
+		offNMI    = 0x060
+		offL2     = 0x080
+		offL3     = 0x0A0
+		offL4     = 0x0C0
+		offL5     = 0x0E0
+		offL6     = 0x100
+		offL7     = 0x120
+		offL1     = 0x180 // **UserException / Level-1**
+		offDouble = 0x1C0
+	)
+
+	// 1) Level-1 / UserException at +0x180
+	println("[1] UserExceptionVector (Level-1) at offset 0x180:")
+	u0, _ := read32(base + offL1)
+	u1, _ := read32(base + offL1 + 4)
+	print("  +0x180: ")
+	printptr(uintptr(u0))
+	println()
+	print("  +0x184: ")
+	printptr(uintptr(u1))
+	println()
+
+	// 2) The rest of the vectors (single word dump is enough: call0 stub)
+	type vec struct {
+		name string
+		off  uintptr
+	}
+	others := []vec{
+		{"KernelExceptionVector", offKernel},
+		{"NMIExceptionVector", offNMI},
+		{"Level2InterruptVector", offL2},
+		{"Level3InterruptVector", offL3},
+		{"Level4InterruptVector", offL4},
+		{"Level5InterruptVector", offL5},
+		{"Level6InterruptVector", offL6},
+		{"Level7InterruptVector", offL7},
+		{"DoubleExceptionVector", offDouble},
+	}
+	for i, v := range others {
+		print("[", i+2, "] ", v.name, " at offset ")
+		printptr(v.off)
+		println(":")
+		w0, _ := read32(base + v.off)
+		print("  +")
+		printptr(v.off)
 		print(": ")
-		printptr(uintptr(val))
-		if val != 0 {
-			// Декодирование инструкций Xtensa
-			opcode := val & 0xFF
-			if opcode == 0x00 && ((val>>8)&0xFF) == 0xD1 {
-				print(" (wsr a0, EXCSAVE_1)")
-			} else if opcode == 0x17 || opcode == 0x05 || (opcode&0x0F) == 0x05 {
-				print(" (call0 or j)")
-			} else if opcode == 0xC5 {
-				print(" (call0)")
-			} else if val == 0x002000 {
-				print(" (rsync)")
-			} else if val == 0x003000 {
-				print(" (rfe)")
-			} else {
-				print(" (instr)")
-			}
+		printptr(uintptr(w0))
+		// Many of these are small call0 stubs in ROM/IRAM, opcode low byte 0xC5
+		if (w0 & 0xFF) == 0xC5 {
+			print(" (call0 -> _xt_unhandled_exception)")
 		}
 		println()
 	}
 
-	// DoubleExceptionVector (0x20)
-	println("\n[2] DoubleExceptionVector at offset 0x20:")
-	for i := 8; i < 16; i++ {
-		val := ptr[i]
-		if val != 0 {
-			print("  +")
-			printptr(uintptr(i * 4))
-			print(": ")
-			printptr(uintptr(val))
-			if (val & 0xFF) == 0xC5 {
-				print(" (call0 -> _xt_unhandled_exception)")
-			}
-			println()
-		}
-	}
-
-	// KernelExceptionVector (0x40)
-	println("\n[3] KernelExceptionVector at offset 0x40:")
-	for i := 16; i < 24; i++ {
-		val := ptr[i]
-		if val != 0 {
-			print("  +")
-			printptr(uintptr(i * 4))
-			print(": ")
-			printptr(uintptr(val))
-			if (val & 0xFF) == 0xC5 {
-				print(" (call0 -> _xt_unhandled_exception)")
-			}
-			println()
-		}
-	}
-
-	// NMIExceptionVector (0x60)
-	println("\n[4] NMIExceptionVector at offset 0x60:")
-	for i := 24; i < 32; i++ {
-		val := ptr[i]
-		if val != 0 {
-			print("  +")
-			printptr(uintptr(i * 4))
-			print(": ")
-			printptr(uintptr(val))
-			if (val & 0xFF) == 0xC5 {
-				print(" (call0 -> _xt_unhandled_exception)")
-			}
-			println()
-		}
-	}
-
-	// Level2InterruptVector (0x80)
-	println("\n[5] Level2InterruptVector at offset 0x80:")
-	for i := 32; i < 40; i++ {
-		val := ptr[i]
-		if val != 0 {
-			print("  +")
-			printptr(uintptr(i * 4))
-			print(": ")
-			printptr(uintptr(val))
-			if (val & 0xFF) == 0xC5 {
-				print(" (call0 -> _xt_unhandled_exception)")
-			}
-			println()
-		}
-	}
-
-	// Level3InterruptVector (0xA0)
-	println("\n[6] Level3InterruptVector at offset 0xA0:")
-	for i := 40; i < 48; i++ {
-		val := ptr[i]
-		if val != 0 {
-			print("  +")
-			printptr(uintptr(i * 4))
-			print(": ")
-			printptr(uintptr(val))
-			if (val & 0xFF) == 0xC5 {
-				print(" (call0 -> _xt_unhandled_exception)")
-			}
-			println()
-		}
-	}
-
-	// Level4-7 (детальный вывод)
-	println("\n[7] Level4InterruptVector at offset 0xC0:")
-	for i := 48; i < 56; i++ {
-		val := ptr[i]
-		if val != 0 {
-			print("  +")
-			printptr(uintptr(i * 4))
-			print(": ")
-			printptr(uintptr(val))
-			if (val & 0xFF) == 0xC5 {
-				print(" (call0 -> _xt_unhandled_exception)")
-			}
-			println()
-		}
-	}
-
-	println("\n[8] Level5InterruptVector at offset 0xE0:")
-	for i := 56; i < 64; i++ {
-		val := ptr[i]
-		if val != 0 {
-			print("  +")
-			printptr(uintptr(i * 4))
-			print(": ")
-			printptr(uintptr(val))
-			if (val & 0xFF) == 0xC5 {
-				print(" (call0 -> _xt_unhandled_exception)")
-			}
-			println()
-		}
-	}
-
-	println("\n[9] Level6InterruptVector at offset 0x100:")
-	for i := 64; i < 72; i++ {
-		val := ptr[i]
-		if val != 0 {
-			print("  +")
-			printptr(uintptr(i * 4))
-			print(": ")
-			printptr(uintptr(val))
-			if (val & 0xFF) == 0xC5 {
-				print(" (call0 -> _xt_unhandled_exception)")
-			}
-			println()
-		}
-	}
-
-	println("\n[10] Level7InterruptVector at offset 0x120:")
-	for i := 72; i < 80; i++ {
-		val := ptr[i]
-		if val != 0 {
-			print("  +")
-			printptr(uintptr(i * 4))
-			print(": ")
-			printptr(uintptr(val))
-			if (val & 0xFF) == 0xC5 {
-				print(" (call0 -> _xt_unhandled_exception)")
-			}
-			println()
-		}
-	}
-
-	// Общая статистика
+	// --- SUMMARY / VALIDATION ---
 	println("\n=== SUMMARY ===")
+	// Count non-zero across the range [0x040..0x1C0] step 4 + L1 block first two words
 	totalNonZero := 0
-	for i := 0; i < 80; i++ {
-		if ptr[i] != 0 && ptr[i] != 0xFFFFFFFF {
+	for off := uintptr(0x040); off <= 0x1C0; off += 4 {
+		w, _ := read32(base + off)
+		if w != 0 && w != 0xFFFFFFFF {
 			totalNonZero++
 		}
 	}
-	println("Total non-zero words:", totalNonZero, "/ 80")
+	// include L1 +0/+4 (already inside loop if 0x180..0x184) but safe to keep
+	println("Total non-zero words:", totalNonZero, "/", (0x1C0-0x040)/4+1)
 
-	// Проверка первой инструкции
-	firstInstr := ptr[0]
-	if (firstInstr & 0x00FF00) == 0x00D100 {
-		println("✓ UserExceptionVector first instruction: wsr a0, EXCSAVE_1 - CORRECT!")
+	// Validate Level-1 actually present at +0x180
+	if u0 == 0 {
+		println("\u2717 WARNING: Level-1 vector at +0x180 is zero (unexpected)")
 	} else {
-		println("✗ WARNING: Unexpected first instruction")
+		println("\u2713 Level-1 vector present at +0x180")
 	}
 
-	// Анализ векторной таблицы
-	println("\n=== VECTOR TABLE ANALYSIS ===")
-	println("Vector structure:")
-	println("  ✓ UserExceptionVector: 2 instructions (wsr + jump)")
-	println("  ✓ All other vectors: call0 to _xt_unhandled_exception")
+	// Symbol address for `_UserExceptionVector` must equal base+0x180
+	uevSym := getUserExceptionVector()
+	print("UserExceptionVector symbol addr: ")
+	println(uint32(uevSym))
+	if uevSym != base+offL1 {
+		println("\u2717 WARNING: _UserExceptionVector != VECBASE+0x180 (unexpected symbol placement)")
+	}
+
+	// Show first two words at the symbol (should match the +0x180 dump)
+	uS0, _ := read32(uevSym + 0)
+	uS1, _ := read32(uevSym + 4)
+	print("UserException tramp[0..1]: ")
+	printptr(uintptr(uS0))
+	print(" ")
+	printptr(uintptr(uS1))
 	println()
-	secondInstr := ptr[1]
-	print("Second instruction in UserExceptionVector: ")
-	printptr(uintptr(secondInstr))
-	println()
-	if (secondInstr & 0xFF) == 0x17 {
-		println("  → This is likely 'j' (jump) instruction")
-		println("  → Should jump to _xt_user_exc handler")
+
+	// Quick range check: vector code must live in IRAM 0x4030_0000..0x407F_FFFF
+	if uevSym < 0x40300000 || uevSym >= 0x40800000 {
+		println("\u2717 WARNING: _UserExceptionVector outside IRAM range")
+	}
+
+	// Alignment / base consistency checks
+	if (vectorBaseAddr & 0x1FF) != 0 {
+		println("\u2717 WARNING: _vector_base is not 0x200-aligned")
+	}
+	if vectorBaseAddr != uintptr(vecbase) {
+		println("\u2717 WARNING: VECBASE != _vector_base (unexpected)")
 	}
 
 	println("\n=== END MEMORY CHECK ===\n")
@@ -659,11 +561,11 @@ func initSystimerTick() {
 	// Temporarily block interrupts during configuration
 	println("SYST: Before Disable()...")
 	old := interrupt.Disable()
-	println("SYST: After Disable(), old INTLEVEL=", uint32(old))
+	println("SYST: After Disable(), old INTLEVEL=", uint32(old)&0x0F)
 
 	// Verify interrupts are actually disabled
-	psAfterDisable := device.AsmFull("rsr.ps {}", nil)
-	intlevelNow := uint32(uintptr(psAfterDisable)) & 0x0F
+	psAfterDisable := interrupt.GetPS()
+	intlevelNow := psAfterDisable & 0x0F
 	println("SYST: Current INTLEVEL (should be 15):", intlevelNow)
 
 	// === CRITICAL: Enable SYSTIMER peripheral clock and reset ===
@@ -812,9 +714,27 @@ func initSystimerTick() {
 	}
 	println("SYST: Periodic alarm armed (ESP-IDF style)!")
 
+	// --- ACCESS CHECK: SYSTIMER INT_ENA (alarm target0) ---
+	enaBefore := esp.SYSTIMER.INT_ENA.Get()
+	println("SYST: INT_ENA before:", enaBefore)
+
+	// try set TARGET0 interrupt enable bit and read back
+	esp.SYSTIMER.INT_ENA.SetBits(1 << 0)
+	enaAfterSet := esp.SYSTIMER.INT_ENA.Get()
+	println("SYST: INT_ENA after Set(bit0):", enaAfterSet)
+
+	// clear it back to 0 and read back
+	esp.SYSTIMER.INT_ENA.ClearBits(1 << 0)
+	enaAfterClr := esp.SYSTIMER.INT_ENA.Get()
+	println("SYST: INT_ENA after Clear(bit0):", enaAfterClr)
+
+	// restore for runtime
+	esp.SYSTIMER.INT_ENA.SetBits(1 << 0)
+	// --- END ACCESS CHECK ---
+
 	// Verify interrupts are still disabled before Restore
-	psBeforeRestore := device.AsmFull("rsr.ps {}", nil)
-	intlevelBefore := uint32(uintptr(psBeforeRestore)) & 0x0F
+	psBeforeRestore := interrupt.GetPS()
+	intlevelBefore := psBeforeRestore & 0x0F
 	println("SYST: Before Restore(), INTLEVEL=", intlevelBefore, "(should be 15)")
 	println("SYST: Will restore to INTLEVEL=", uint32(old))
 
@@ -827,16 +747,26 @@ func initSystimerTick() {
 	println("SYST: Returned from interrupt.Restore()!")
 
 	// Verify interrupts are restored
-	psAfterRestore := device.AsmFull("rsr.ps {}", nil)
-	intlevelAfter := uint32(uintptr(psAfterRestore)) & 0x0F
+	psAfterRestore := interrupt.GetPS()
+	intlevelAfter := psAfterRestore & 0x0F
 	println("SYST: After Restore(), INTLEVEL=", intlevelAfter, "(should be", uint32(old), ")")
 	println("SYST: PS.INTLEVEL restored, now enabling CPU interrupt line...")
 
-	// NOW enable CPU interrupt line for SYSTIMER through INTENABLE
-	println("SYST: Reading INTENABLE...")
-	ien := interrupt.ReadIntEnable()
-	println("SYST: Current INTENABLE:", ien)
+	// --- ACCESS CHECK: Interrupt Matrix mapping register ---
+	mapBefore := esp.INTERRUPT_CORE0.SYSTIMER_TARGET0_INT_MAP.Get()
+	println("SYST: MAP check before:", mapBefore)
+	esp.INTERRUPT_CORE0.SYSTIMER_TARGET0_INT_MAP.Set(uint32(cpuInterruptForSystimer))
+	mapAfter := esp.INTERRUPT_CORE0.SYSTIMER_TARGET0_INT_MAP.Get()
+	println("SYST: MAP check after set to", cpuInterruptForSystimer, ":", mapAfter)
+	// --- END ACCESS CHECK ---
 
+	// Prepare for INTENABLE write, but do not write yet
+	var ien uint32
+	// Read INTENABLE directly via inline SR to avoid helper/linkname issues
+	println("SYST: Reading INTENABLE (inline rsr)...")
+	ienVal := device.AsmFull("rsr.intenable {}", nil)
+	ien = uint32(uintptr(ienVal))
+	println("SYST: Current INTENABLE:", ien)
 	println("SYST: Setting bit", cpuInterruptForSystimer, "...")
 	ien |= (1 << cpuInterruptForSystimer)
 	println("SYST: New INTENABLE:", ien)
@@ -871,17 +801,56 @@ func initSystimerTick() {
 	intStAfter := esp.SYSTIMER.INT_ST.Get()
 	println("SYST: After clear: INT_RAW=", intRawAfter, "INT_ST=", intStAfter)
 
-	// Write INTENABLE with proper value
+	// Write INTENABLE with proper value under mask to avoid races
 	println("SYST: Reading INTENABLE...")
 	ien = interrupt.ReadIntEnable()
 	println("SYST: Current INTENABLE:", ien)
 	println("SYST: Setting bit", cpuInterruptForSystimer, "...")
 	ien |= (1 << cpuInterruptForSystimer)
 	println("SYST: New INTENABLE:", ien)
-	interrupt.WriteIntEnable(ien)
-	// Unmask CPU interrupts now that peripheral and mapping are armed
+	println("SYST: Disabling interrupts for INTENABLE write...")
+	oldMask := interrupt.Disable()
+	// Direct inline write + rsync
+	device.AsmFull("wsr.intenable {val}; rsync", map[string]interface{}{"val": uintptr(ien)})
+	// Direct inline readback while masked
+	ienAfterVal := device.AsmFull("rsr.intenable {}", nil)
+	ienAfter := uint32(uintptr(ienAfterVal))
+	println("SYST: INTENABLE readback (masked, inline):", ienAfter)
+	interrupt.Restore(oldMask)
+	println("SYST: Restored mask after INTENABLE write")
+	// Ensure unmasked for IRQ reception
 	interrupt.SetPSIntLevel(0)
+	psNow := interrupt.GetPS()
+	println("SYST: After SetPSIntLevel(0), INTLEVEL=", psNow&0x0F)
 	println("SYST: INTENABLE bit", cpuInterruptForSystimer, "set - interrupts now ACTIVE!")
+
+	// Final pre-loop assertions (debug)
+	psDbg := interrupt.GetPS()
+	println("SYST: ASSERT INTLEVEL before wait:", psDbg&0x0F)
+	vbDbg := device.AsmFull("rsr.vecbase {}", nil)
+	println("SYST: ASSERT VECBASE before wait:", uint32(uintptr(vbDbg)))
+	// Observe CPU pending register at this moment
+	intrPend := device.AsmFull("rsr.interrupt {}", nil)
+	println("SYST: CPU INTERRUPT pending before wait:", uint32(uintptr(intrPend)))
+
+	// --- DEBUG: observe pending, then force SW interrupt on CPU line 1 ---
+	intrPend0 := device.AsmFull("rsr.interrupt {}", nil)
+	println("SYST: CPU INTERRUPT pending (pre‑SW test):", uint32(uintptr(intrPend0)))
+
+	println("SYST: Forcing SW INTSET for CPU line 1…")
+	device.AsmFull("wsr.intset {v}; rsync", map[string]interface{}{"v": uintptr(1 << uint(cpuInterruptForSystimer))})
+
+	intrPend1 := device.AsmFull("rsr.interrupt {}", nil)
+	println("SYST: CPU INTERRUPT pending after INTSET:", uint32(uintptr(intrPend1)))
+
+	// tiny delay so ISR can run (busy loop avoids waiti which could mask view)
+	for i := 0; i < 200000; i++ {
+		_ = i
+	}
+
+	intrPend2 := device.AsmFull("rsr.interrupt {}", nil)
+	println("SYST: CPU INTERRUPT pending after delay:", uint32(uintptr(intrPend2)))
+	println("SYST: ASM ISR counter after SW INT:", isrCallCount[0])
 
 	// PERIODIC mode: alarm auto-reloads, just wait for interrupts
 	println("SYST: Waiting for interrupts...")
@@ -902,8 +871,8 @@ func initSystimerTick() {
 	println("SYST: IRQs enabled, starting wait loop...")
 
 	// Wait a bit
-	for i := 0; i < 100000; i++ {
-		if i%10000 == 0 {
+	for i := 0; i < 20000; i++ {
+		if i%5000 == 0 {
 			// Read ASM counter
 			asmCount := isrCallCount[0]
 
