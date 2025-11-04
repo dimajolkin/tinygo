@@ -107,9 +107,9 @@ SECTIONS
         /* Level7/Debug at +0x120 */
         . = _vector_base + 0x120;
         __debug_vec_start = .;
-        KEEP(*(.DebugInterruptVector.text));
+        KEEP(*(.Level7InterruptVector.text));
         __debug_vec_end = .;
-        ASSERT((__debug_vec_end - __debug_vec_start) <= 0x20, "Debug vector exceeds 32 bytes");
+        ASSERT((__debug_vec_end - __debug_vec_start) <= 0x20, "Level7 vector exceeds 32 bytes");
 
         /* UserException (Level-1) at +0x180 — CRITICAL for IRQ delivery */
         . = _vector_base + 0x180;

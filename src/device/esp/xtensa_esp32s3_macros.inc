@@ -88,8 +88,8 @@
 #define XT_SOL_A15         28
 #define XT_SOL_FRMSZ       32
 
-#define XT_STK_FRMSZ      112
-#define XT_FRAME_SIZE      112
+#define XT_STK_FRMSZ      144
+#define XT_FRAME_SIZE      144
 
     .macro SPILL_ALL_WINDOWS
 #if XCHAL_NUM_AREGS == 64

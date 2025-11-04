@@ -46,6 +46,33 @@ var textStartSymbol [0]byte
 //go:extern _UserExceptionVector
 var userExceptionVectorSymbol [0]byte
 
+//go:extern _KernelExceptionVector
+var kernelExceptionVectorSymbol [0]byte
+
+//go:extern _NMIExceptionVector
+var nmiExceptionVectorSymbol [0]byte
+
+//go:extern _Level2InterruptVector
+var level2InterruptVectorSymbol [0]byte
+
+//go:extern _Level3InterruptVector
+var level3InterruptVectorSymbol [0]byte
+
+//go:extern _Level4InterruptVector
+var level4InterruptVectorSymbol [0]byte
+
+//go:extern _Level5InterruptVector
+var level5InterruptVectorSymbol [0]byte
+
+//go:extern _Level6InterruptVector
+var level6InterruptVectorSymbol [0]byte
+
+//go:extern _Level7InterruptVector
+var level7InterruptVectorSymbol [0]byte
+
+//go:extern _DoubleExceptionVector
+var doubleExceptionVectorSymbol [0]byte
+
 //go:extern _isr_call_count
 var isrCallCount [1]uint32
 
@@ -66,6 +93,16 @@ func getTextStart() uintptr {
 func getUserExceptionVector() uintptr {
 	return uintptr(unsafe.Pointer(&userExceptionVectorSymbol))
 }
+
+func getKernelExceptionVector() uintptr { return uintptr(unsafe.Pointer(&kernelExceptionVectorSymbol)) }
+func getNMIExceptionVector() uintptr    { return uintptr(unsafe.Pointer(&nmiExceptionVectorSymbol)) }
+func getLevel2InterruptVector() uintptr { return uintptr(unsafe.Pointer(&level2InterruptVectorSymbol)) }
+func getLevel3InterruptVector() uintptr { return uintptr(unsafe.Pointer(&level3InterruptVectorSymbol)) }
+func getLevel4InterruptVector() uintptr { return uintptr(unsafe.Pointer(&level4InterruptVectorSymbol)) }
+func getLevel5InterruptVector() uintptr { return uintptr(unsafe.Pointer(&level5InterruptVectorSymbol)) }
+func getLevel6InterruptVector() uintptr { return uintptr(unsafe.Pointer(&level6InterruptVectorSymbol)) }
+func getLevel7InterruptVector() uintptr { return uintptr(unsafe.Pointer(&level7InterruptVectorSymbol)) }
+func getDoubleExceptionVector() uintptr { return uintptr(unsafe.Pointer(&doubleExceptionVectorSymbol)) }
 
 // Debug functions sorted by GPIO number (ascending: 4→5→6→7)
 func debugGPIO(n int) {
@@ -178,7 +215,7 @@ func main() {
 	}
 	print("\n")
 
-	//checkVectorsInMemory()
+	checkVectorsInMemory()
 
 	// Initialize SYSTIMER for system tick
 	//initSystimerTick()  // DISABLED: testing exceptions without interrupts
@@ -450,36 +487,65 @@ func checkVectorsInMemory() {
 		println("; using actual symbol offset above")
 	}
 
-	// 2) The rest of the vectors (single word dump is enough: call0 stub)
-	type vec struct {
+	// 2) The rest of the vectors (validate both canonical offsets and exported symbols)
+	type vecInfo struct {
 		name string
 		off  uintptr
+		sym  uintptr
 	}
-	others := []vec{
-		{"KernelExceptionVector", defOffKernel},
-		{"NMIExceptionVector", defOffNMI},
-		{"Level2InterruptVector", defOffL2},
-		{"Level3InterruptVector", defOffL3},
-		{"Level4InterruptVector", defOffL4},
-		{"Level5InterruptVector", defOffL5},
-		{"Level6InterruptVector", defOffL6},
-		{"Level7InterruptVector", defOffL7},
-		{"DoubleExceptionVector", defOffDouble},
+	others := []vecInfo{
+		{"KernelExceptionVector", defOffKernel, getKernelExceptionVector()},
+		{"NMIExceptionVector", defOffNMI, getNMIExceptionVector()},
+		{"Level2InterruptVector", defOffL2, getLevel2InterruptVector()},
+		{"Level3InterruptVector", defOffL3, getLevel3InterruptVector()},
+		{"Level4InterruptVector", defOffL4, getLevel4InterruptVector()},
+		{"Level5InterruptVector", defOffL5, getLevel5InterruptVector()},
+		{"Level6InterruptVector", defOffL6, getLevel6InterruptVector()},
+		{"Level7InterruptVector", defOffL7, getLevel7InterruptVector()},
+		{"DoubleExceptionVector", defOffDouble, getDoubleExceptionVector()},
 	}
+
+	mismatches := 0
 	for i, v := range others {
 		print("[", i+2, "] ", v.name, " at offset ")
 		printhex32(uint32(v.off))
 		println(":")
+
+		// Dump word at VECBASE+offset
 		w0, _ := read32(base + v.off)
-		print("  +")
+		print("  VECBASE+")
 		printhex32(uint32(v.off))
 		print(": ")
 		printptr(uintptr(w0))
-		// Many of these are small call0 stubs in ROM/IRAM, opcode low byte 0xC5
 		if (w0 & 0xFF) == 0xC5 {
-			print(" (call0 -> _xt_unhandled_exception)")
+			print(" (call0 stub)")
 		}
 		println()
+
+		// Dump word at symbol (if exported)
+		if v.sym != 0 {
+			s0, _ := read32(v.sym + 0)
+			print("  SYMBOL  ")
+			printptr(v.sym)
+			print(": ")
+			printptr(uintptr(s0))
+			println()
+
+			// Compare addresses and contents
+			if v.sym != base+v.off || s0 != w0 {
+				println("  ✗ MISMATCH: symbol vs VECBASE+offset differ")
+				print("    sym:     ")
+				printptr(v.sym)
+				print("   | base+off: ")
+				printptr(base + v.off)
+				println()
+				mismatches++
+			} else {
+				println("  ✓ symbol matches VECBASE+offset and contents")
+			}
+		} else {
+			println("  ⚠️  No exported symbol found (skipping symbol cross-check)")
+		}
 	}
 
 	// --- SUMMARY / VALIDATION ---
@@ -541,6 +607,13 @@ func checkVectorsInMemory() {
 	print("  | Canonical (ESP‑IDF): ")
 	printhex32(uint32(defOffL1))
 	println()
+
+	println()
+	if mismatches > 0 {
+		println("SUMMARY: ", mismatches, " vector symbol mismatches detected. Verify linker placement/section names.")
+	} else {
+		println("SUMMARY: all exported vector symbols match VECBASE+canonical offsets.")
+	}
 
 	println("\n=== END MEMORY CHECK ===\n")
 }

@@ -4,32 +4,46 @@
 
 /*
  * Xtensa Context Save/Restore for ESP32-S3 (Call0 ABI)
+ * Based on ESP-IDF: components/xtensa/xtensa_context.S
  * 
  * Этот файл содержит низкоуровневые функции для сохранения и восстановления
  * контекста процессора при обработке прерываний.
  * 
  * Используется Call0 ABI (не Windowed):
  * - Сохраняется только 16 регистров (A0-A15)
- * - Контекст = 112 байт (не 256+ как в Windowed)
+ * - Контекст = XT_STK_FRMSZ байт (144 байта для ESP32-S3)
  * - Быстрое переключение контекста
  */
 
+/* Special Register Numbers (from ESP-IDF xtensa/specreg.h) */
+#define SREG_SAR        3
+#define SREG_EXCCAUSE   232
+#define SREG_EXCVADDR   238
+#define SREG_LBEG       0
+#define SREG_LEND       1
+#define SREG_LCOUNT     2
+#define SREG_PS         230
+#define SREG_EPC1       177
+
 /*
  * _xt_context_save - Сохранить контекст текущего исполнения на стек
+ * Based on ESP-IDF: components/xtensa/xtensa_context.S
+ * 
+ * ВАЖНО: Вызывающий код должен УЖЕ выделить XT_STK_FRMSZ байт на стеке!
+ * ВАЖНО: a12, a13 должны быть УЖЕ сохранены вызывающим кодом!
  * 
  * Входные параметры:
- *   a1 (sp) = текущий указатель стека
+ *   a1 (sp) = указатель на уже выделенный stack frame
  *   
  * Действия:
- *   1. Сохранить все регистры A0-A15 на стек
- *   2. Сохранить регистры управления
- *   3. Выровнять стек на 16 байт
+ *   1. Сохранить оставшиеся регистры A2-A11, A14-A15 на стек
+ *   2. Сохранить регистры управления (SAR, LBEG/LEND/LCOUNT)
  *   
  * Выходные параметры:
- *   a1 (sp) = новый указатель стека (на 112 байт ниже)
- *   [sp] = сохраненный контекст
+ *   Все регистры сохранены в [sp]
  *   
- * Использует: a2-a7 (рабочие регистры)
+ * Использует: a2-a3 (рабочие регистры)
+ * Сохраняет: a0 (return address сохраняется через стек)
  */
 .section .text._xt_context_save,"ax",@progbits
 .align 4
@@ -37,15 +51,9 @@
 .type _xt_context_save,@function
 
 _xt_context_save:
-    // Вычесть из стека 112 байт (размер контекста)
-    addi    sp, sp, -XT_STK_FRMSZ           // sp -= 112
+    /* NOTE: a12, a13 already saved by caller (_frxt_int_enter) */
     
-    // ===== Сохранить регистры общего назначения =====
-    // Сохранить A0 на смещение XT_STK_A0 (12 байт)
-    s32i    a0, sp, XT_STK_A0
-    // Сохранить исходный SP (до вычитания): sp_old = sp + XT_STK_FRMSZ
-    addi    a3, sp, XT_STK_FRMSZ
-    s32i    a3, sp, XT_STK_A1
+    /* Save a2-a11 */
     s32i    a2, sp, XT_STK_A2
     s32i    a3, sp, XT_STK_A3
     s32i    a4, sp, XT_STK_A4
@@ -56,69 +64,52 @@ _xt_context_save:
     s32i    a9, sp, XT_STK_A9
     s32i    a10, sp, XT_STK_A10
     s32i    a11, sp, XT_STK_A11
-    s32i    a12, sp, XT_STK_A12
-    s32i    a13, sp, XT_STK_A13
+
+    /* Save a14-a15 (a12-a13 already saved by caller) */
     s32i    a14, sp, XT_STK_A14
     s32i    a15, sp, XT_STK_A15
 
-    // ===== Сохранить регистры управления =====
-
-    // SAR (Shift Amount Register)
-    rsr.sar a2
+    /* Save special registers using numbered format (not dot notation) */
+    
+    /* SAR (Shift Amount Register) */
+    rsr     a2, SREG_SAR
     s32i    a2, sp, XT_STK_SAR
 
-    // EXCCAUSE (Exception Cause)
-    rsr.exccause a2
-    s32i    a2, sp, XT_STK_EXCCAUSE
-
-    // EXCVADDR (Exception Virtual Address)
-    rsr.excvaddr a2
-    s32i    a2, sp, XT_STK_EXCVADDR
-
-    // LBEG, LEND, LCOUNT (Loop registers)
-    rsr.lbeg a2
+    /* Loop registers (if present) */
+    #if XCHAL_HAVE_LOOPS
+    rsr     a2, SREG_LBEG
     s32i    a2, sp, XT_STK_LBEG
-
-    rsr.lend a2
+    rsr     a2, SREG_LEND
     s32i    a2, sp, XT_STK_LEND
-
-    rsr.lcount a2
+    rsr     a2, SREG_LCOUNT
     s32i    a2, sp, XT_STK_LCOUNT
+    #endif
 
-    // ===== Сохранить Program Status и PC =====
-    // PS уже был сохранен в ESP-IDF обработчике, но сохраним для консистентности
-    rsr.ps a2
-    s32i    a2, sp, XT_STK_PS
+    /* NOTE: EXCCAUSE and EXCVADDR already saved by _xt_lowint1 */
+    /* NOTE: PS and PC already saved by _xt_lowint1 */
+    /* NOTE: a0 and a1 already saved by _xt_lowint1 */
 
-    // PC сохраняется из a0 (return address)
-    // Это адрес инструкции, которая должна выполниться при возврате
-    l32i    a2, sp, XT_STK_A0               // Загрузить A0 (return address)
-    s32i    a2, sp, XT_STK_PC
-
-    // Добавить адрес выхода (используется в некоторых обработчиках)
-    movi    a2, _xt_context_restore_and_return
-    s32i    a2, sp, XT_STK_EXIT
-
-    // Возвращаемое значение = указатель на сохраненный контекст
-    // a2 (возвращаемое значение) = sp (новый стек указатель)
-    mov     a2, sp
     ret
 
 /*
  * _xt_context_restore - Восстановить контекст из стека
+ * Based on ESP-IDF: components/xtensa/xtensa_context.S
+ *
+ * ВАЖНО: Предполагается, что sp уже указывает на сохранённый фрейм!
+ * Вызывающий код должен установить sp перед вызовом.
  *
  * Входные параметры:
- *   a2 = указатель на сохраненный контекст (на стеке)
+ *   sp = указатель на сохраненный контекст (stack frame)
  *
  * Действия:
- *   1. Восстановить все регистры из стека
- *   2. Восстановить регистры управления
- *   3. Увеличить стек на 112 байт
- *   4. Перейти на восстановленный адрес (PC)
+ *   1. Восстановить специальные регистры (SAR, LBEG/LEND/LCOUNT)
+ *   2. Восстановить регистры общего назначения a2-a15
  *
- * Регистр a1 (sp) восстанавливается из контекста
+ * Выходные параметры:
+ *   Все регистры восстановлены из [sp]
+ *   sp НЕ изменяется (вызывающий код должен восстановить sp после)
  *
- * Использует: a3-a7 (рабочие регистры при восстановлении)
+ * Использует: a2-a3 (рабочие регистры при восстановлении)
  */
 .section .text._xt_context_restore,"ax",@progbits
 .align 4
@@ -126,65 +117,43 @@ _xt_context_save:
 .type _xt_context_restore,@function
 
 _xt_context_restore:
-    // a2 = указатель на контекст
-    // Используем a2 как базовый указатель для загрузки
+    /* Restore special registers using numbered format (not dot notation) */
+    
+    /* SAR (Shift Amount Register) */
+    l32i    a2, sp, XT_STK_SAR
+    wsr     a2, SREG_SAR
 
-    // ===== Восстановить регистры управления =====
+    /* Loop registers (if present) */
+    #if XCHAL_HAVE_LOOPS
+    l32i    a2, sp, XT_STK_LBEG
+    wsr     a2, SREG_LBEG
+    l32i    a2, sp, XT_STK_LEND
+    wsr     a2, SREG_LEND
+    l32i    a2, sp, XT_STK_LCOUNT
+    wsr     a2, SREG_LCOUNT
+    #endif
 
-    // SAR (Shift Amount Register)
-    l32i    a3, a2, XT_STK_SAR
-    wsr.sar a3
-
-    // EXCCAUSE (Exception Cause)
-    l32i    a3, a2, XT_STK_EXCCAUSE
-    wsr.exccause a3
-
-    // EXCVADDR (Exception Virtual Address)
-    l32i    a3, a2, XT_STK_EXCVADDR
-    wsr.excvaddr a3
-
-    // LBEG, LEND, LCOUNT (Loop registers)
-    l32i    a3, a2, XT_STK_LBEG
-    wsr.lbeg a3
-
-    l32i    a3, a2, XT_STK_LEND
-    wsr.lend a3
-
-    l32i    a3, a2, XT_STK_LCOUNT
-    wsr.lcount a3
-
-    // Program Status (PS)
-    l32i    a3, a2, XT_STK_PS
-    wsr.ps  a3
-
-    // Синхронизация после записи в регистры управления
+    /* Sync after special register writes */
     rsync
 
-    // ===== Восстановить регистры общего назначения =====
-    // A0 восстанавливаем в последний момент (нужен для возврата)
+    /* Restore general registers a2-a15 */
+    /* NOTE: a0, a1 will be restored by caller (_xt_user_exit) */
+    
+    l32i    a2, sp, XT_STK_A2
+    l32i    a3, sp, XT_STK_A3
+    l32i    a4, sp, XT_STK_A4
+    l32i    a5, sp, XT_STK_A5
+    l32i    a6, sp, XT_STK_A6
+    l32i    a7, sp, XT_STK_A7
+    l32i    a8, sp, XT_STK_A8
+    l32i    a9, sp, XT_STK_A9
+    l32i    a10, sp, XT_STK_A10
+    l32i    a11, sp, XT_STK_A11
+    l32i    a12, sp, XT_STK_A12
+    l32i    a13, sp, XT_STK_A13
+    l32i    a14, sp, XT_STK_A14
+    l32i    a15, sp, XT_STK_A15
 
-    // Восстановить A1-A15 (SP восстанавливаем в конце)
-    // Восстановить SP как адрес после фрейма: sp = frame + XT_STK_FRMSZ
-    addi    a1, a2, XT_STK_FRMSZ
-    l32i    a3, a2, XT_STK_A3
-    l32i    a4, a2, XT_STK_A4
-    l32i    a5, a2, XT_STK_A5
-    l32i    a6, a2, XT_STK_A6
-    l32i    a7, a2, XT_STK_A7
-    l32i    a8, a2, XT_STK_A8
-    l32i    a9, a2, XT_STK_A9
-    l32i    a10, a2, XT_STK_A10
-    l32i    a11, a2, XT_STK_A11
-    l32i    a12, a2, XT_STK_A12
-    l32i    a13, a2, XT_STK_A13
-    l32i    a14, a2, XT_STK_A14
-    l32i    a15, a2, XT_STK_A15
-
-    // Восстановить PC в A0 и возвращаемое значение в A2
-    l32i    a0, a2, XT_STK_PC
-    l32i    a2, a2, XT_STK_A2
-
-    // Возврат из обработчика прерывания
     ret
 
 /*
@@ -206,71 +175,9 @@ _xt_context_restore_and_return:
     ret
 
 /*
- * _xt_context_restore_rfe - Восстановить контекст и вернуться через RFE
- *
- * Входные параметры:
- *   a2 = указатель на сохраненный контекст (на стеке)
- *
- * Действия:
- *   1. Восстановить ключевые регистры и SP
- *   2. Восстановить регистры управления (PS, SAR, L*)
- *   3. Выполнить RFE (возврат по EPC1/PS)
+ * Helper function: no longer needed with ESP-IDF style exit
+ * Kept for compatibility if needed in future
  */
-.section .text._xt_context_restore_rfe,"ax",@progbits
-.align 4
-.global _xt_context_restore_rfe
-.type _xt_context_restore_rfe,@function
-
-_xt_context_restore_rfe:
-    // Восстановить SP как адрес после фрейма: sp = frame + XT_STK_FRMSZ
-    addi    a1, a2, XT_STK_FRMSZ
-
-    // Восстановить регистры управления (порядок как в restore)
-    l32i    a3, a2, XT_STK_SAR
-    wsr.sar a3
-
-    l32i    a3, a2, XT_STK_EXCCAUSE
-    wsr.exccause a3
-
-    l32i    a3, a2, XT_STK_EXCVADDR
-    wsr.excvaddr a3
-
-    l32i    a3, a2, XT_STK_LBEG
-    wsr.lbeg a3
-
-    l32i    a3, a2, XT_STK_LEND
-    wsr.lend a3
-
-    l32i    a3, a2, XT_STK_LCOUNT
-    wsr.lcount a3
-
-    // Восстановить EPC1 из сохранённого PC для корректного RFE
-    l32i    a3, a2, XT_STK_PC
-    wsr.epc1 a3
-    // Восстановить PS (INTLEVEL и др.)
-    l32i    a3, a2, XT_STK_PS
-    wsr.ps  a3
-    rsync
-
-    // Восстановить часть общих регистров (минимально необходимое)
-    l32i    a3, a2, XT_STK_A3
-    l32i    a4, a2, XT_STK_A4
-    l32i    a5, a2, XT_STK_A5
-    l32i    a6, a2, XT_STK_A6
-    l32i    a7, a2, XT_STK_A7
-    l32i    a8, a2, XT_STK_A8
-    l32i    a9, a2, XT_STK_A9
-    l32i    a10, a2, XT_STK_A10
-    l32i    a11, a2, XT_STK_A11
-    l32i    a12, a2, XT_STK_A12
-    l32i    a13, a2, XT_STK_A13
-    l32i    a14, a2, XT_STK_A14
-    l32i    a15, a2, XT_STK_A15
-
-    // Возврат из исключения
-    rfe
-    nop
-    nop
 
 /*
  * _xt_check_context_alignment - Проверка выравнивания контекста

@@ -147,77 +147,79 @@ _xt_user_exc:
 /* Trampoline for unhandled exception (must be close for bnei) */
 .align 4
 _xt_to_unhandled_exc:
-    call0   _xt_unhandled_exception         /* long jump to real handler */
+    call0   _xt_unhandled_exception         /* long jump to real handler (Call0 from vector) */
 
 .size       _xt_user_exc, . - _xt_user_exc
 
-/* Low-level level-1 interrupt entry: call Go dispatcher directly */
+/* Low-level level-1 interrupt entry: ESP-IDF compatible version */
 .align 4
 .global _xt_lowint1
 _xt_lowint1:
     /* At entry: a0 saved in EXCSAVE_1 by _UserExceptionVector */
 
-    /* Allocate 64-byte stack frame (16 slots * 4 bytes, 16-byte aligned) */
-    addi    sp, sp, -64
+    /* Allocate full interrupt stack frame (XT_STK_FRMSZ = 144 bytes) */
+    mov     a0, sp                          /* save original SP */
+    addi    sp, sp, -XT_STK_FRMSZ           /* allocate interrupt stack frame */
+    s32i    a0, sp, XT_STK_A1               /* save pre-interrupt SP */
 
-    /* Save a0-a3 (a0 from EXCSAVE_1) */
-    rsr     a2, EXCSAVE_1                   /* a2 = original a0 */
-    s32i    a2, sp, 0                       /* save original a0 */
-    s32i    a1, sp, 4                       /* save a1 (sp already adjusted) */
-    s32i    a2, sp, 8                       /* save a2 (we're using it as temp) */
-    s32i    a3, sp, 12                      /* save a3 */
+    /* Save minimal context (PS, PC, A0) */
+    rsr     a0, PS                          /* save interruptee's PS */
+    s32i    a0, sp, XT_STK_PS
+    rsr     a0, EPC_1                       /* save interruptee's PC */
+    s32i    a0, sp, XT_STK_PC
+    rsr     a0, EXCSAVE_1                   /* save interruptee's a0 */
+    s32i    a0, sp, XT_STK_A0
 
-    /* Save a4-a15 (might be used by Go) */
-    s32i    a4, sp, 16
-    s32i    a5, sp, 20
-    s32i    a6, sp, 24
-    s32i    a7, sp, 28
-    s32i    a8, sp, 32
-    s32i    a9, sp, 36
-    s32i    a10, sp, 40
-    s32i    a11, sp, 44
-    s32i    a12, sp, 48
-    s32i    a13, sp, 52
-    s32i    a14, sp, 56
-    s32i    a15, sp, 60
+    /* Save exit point for dispatch (CRITICAL: required for proper return!) */
+    .literal_position
+    l32r    a0, .Lxt_user_exit_addr         /* load address of _xt_user_exit */
+    s32i    a0, sp, XT_STK_EXIT
 
-    /* Increment ISR counter */
+    /* EXCSAVE_1 is now free to use for backtrace */
+    #ifdef XT_DEBUG_BACKTRACE
+    #ifndef __XTENSA_CALL0_ABI__
+    mov     a0, sp
+    wsr     a0, EXCSAVE_1                   /* save current SP for backtrace */
+    #endif
+    #endif
+
+    /* Save rest of interrupt context and enter RTOS */
+    call0   _frxt_int_enter                 /* common RTOS interrupt entry */
+
+    /* !! We are now on the interrupt context with full frame saved !! */
+
+    /* Set up PS for C, enable interrupts above this level and clear EXCM */
+    /* This allows nested interrupts of higher priority */
+    /* PS = INTLEVEL(1) | PS_UM for Call0 ABI */
+    /* INTLEVEL(1) = 0x00000001, PS_UM = 0x00000020 */
+    #ifdef __XTENSA_CALL0_ABI__
+    movi    a0, 0x00000021                  /* PS_INTLEVEL(1) | PS_UM */
+    #else
+    movi    a0, 0x00040021                  /* PS_INTLEVEL(1) | PS_UM | PS_WOE */
+    #endif
+    wsr     a0, PS
+    rsync
+
+    /* OK to call C code at this point, dispatch to Go ISR */
+    /* Increment debug counter before calling Go */
     .literal_position
     l32r    a2, .Lisr_count_addr
     l32i    a3, a2, 0
     addi    a3, a3, 1
     s32i    a3, a2, 0
 
-    /* Call Go dispatcher: handleInterrupt reads INTERRUPT & INTENABLE itself */
+    /* Call Go interrupt dispatcher */
     .literal_position
     l32r    a0, .LhandleInterrupt_addr
     callx0  a0                              /* call handleInterrupt() */
 
-    /* Restore a4-a15 */
-    l32i    a15, sp, 60
-    l32i    a14, sp, 56
-    l32i    a13, sp, 52
-    l32i    a12, sp, 48
-    l32i    a11, sp, 44
-    l32i    a10, sp, 40
-    l32i    a9, sp, 36
-    l32i    a8, sp, 32
-    l32i    a7, sp, 28
-    l32i    a6, sp, 24
-    l32i    a5, sp, 20
-    l32i    a4, sp, 16
+    /* Done handling interrupts, transfer control to RTOS exit */
+    call0   _frxt_int_exit                  /* does not return directly here */
 
-    /* Restore a0-a3 */
-    l32i    a3, sp, 12
-    l32i    a2, sp, 8
-    l32i    a1, sp, 4
-    l32i    a0, sp, 0
-
-    /* Deallocate stack frame */
-    addi    sp, sp, 64
-
-    /* Return from exception */
-    rfe
+    /* Exit through saved XT_STK_EXIT (points to _xt_user_exit) */
+    /* Note: _frxt_int_exit may switch tasks, so we return via saved exit point */
+    l32i    a0, sp, XT_STK_EXIT
+    jx      a0                              /* jump to _xt_user_exit */
 
 .size       _xt_lowint1, . - _xt_lowint1
 
@@ -227,6 +229,8 @@ _xt_lowint1:
     .word _isr_call_count
 .LhandleInterrupt_addr:
     .word handleInterrupt
+.Lxt_user_exit_addr:
+    .word _xt_user_exit
 
 .global _xt_user_exit
 _xt_user_exit:

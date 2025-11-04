@@ -63,16 +63,18 @@
 .type _frxt_int_enter,@function
 
 /*
- * _frxt_int_enter - Interrupt entry hook
+ * _frxt_int_enter - Interrupt entry hook (ESP-IDF compatible)
+ * Based on ESP-IDF: components/freertos/FreeRTOS-Kernel-SMP/portable/xtensa/portasm.S
  *
  * Purpose:
+ *   - Save complete context (a12-a13 first, then call _xt_context_save for rest)
  *   - Increment interrupt nesting depth counter
- *   - Do NOT change PS.INTLEVEL here (hardware already raised it on entry)
- *   - Placeholder for future FreeRTOS-like preemption logic
+ *   - Switch to interrupt stack if nesting == 1
  *
  * Calling convention:
  *   - Uses Call0 ABI
- *   - a2 may carry the current interrupt level (1..7), but we ignore it for now
+ *   - Called from _xt_lowint1 after minimal context (a0, a1, PS, PC, EXIT) saved
+ *   - Returns to caller who will then set up PS for C and call handlers
  */
 .section .text._frxt_int_enter,"ax",@progbits
 .align 4
@@ -80,28 +82,32 @@
 .type _frxt_int_enter,@function
 
 _frxt_int_enter:
-    // Получить адрес счетчика глубины
-    movi    a3, _frxt_int_depth
-    l32i    a4, a3, 0           // a4 = текущая глубина
+    /* Save a12-a13 in the stack frame as required by _xt_context_save */
+    s32i    a12, sp, XT_STK_A12
+    s32i    a13, sp, XT_STK_A13
 
-    // Увеличить глубину вложенности
-    addi    a4, a4, 1
-    s32i    a4, a3, 0           // Сохранить новую глубину
+    /* Save return address in a safe place (free a0) */
+    mov     a12, a0
 
-    // TEMPORARY: DO NOT change INTLEVEL to avoid nested interrupts during debugging
-    // Keep INTLEVEL high (set by hardware when entering exception)
-    // This prevents re-entrant interrupts
-    // TODO: Re-enable this once basic interrupts work
-    // rsr     a3, PS
-    // movi    a4, 0xFFFFFFF0       // очистить младшие 4 бита INTLEVEL
-    // and     a3, a3, a4
-    // addi    a2, a2, -1
-    // movi    a4, 0x7
-    // and     a2, a2, a4           // ограничить до 0..7
-    // or      a3, a3, a2
-    // wsr     a3, PS
-    // rsync
+    /* Save the rest of the interrupted context (preserves A12-13) */
+    call0   _xt_context_save
 
+    /* 
+     * Manage interrupt nesting depth.
+     * NOTE: For now, we don't switch to interrupt stack (simplified version).
+     * Full ESP-IDF also:
+     *   - Checks port_xSchedulerRunning
+     *   - Switches to interrupt stack on first nesting level
+     *   - Saves current TCB's SP
+     */
+    
+    movi    a2, _frxt_int_depth
+    l32i    a3, a2, 0                   /* a3 = current nesting depth */
+    addi    a3, a3, 1                   /* increment nesting count */
+    s32i    a3, a2, 0                   /* save nesting count */
+
+    /* Restore return address and return */
+    mov     a0, a12
     ret
 
 .section .text._frxt_int_exit,"ax",@progbits
@@ -212,17 +218,17 @@ _xt_level1_int_handler_entry:
 .type _xt_unhandled_exception,@function
 
 _xt_unhandled_exception:
-    /* Exception frame already set up by vector handler */
-
-    /* Prepare Call0 ABI args (a2..a4) */
-    rsr     a2, EXCCAUSE        // a2 = exccause
-    rsr     a3, EXCVADDR        // a3 = excvaddr
-    l32i    a4, sp, XT_STK_PC   // a4 = epc
-
-    /* Call Go handler using call0 (Call0 ABI; no window rotation) */
+    /* Called from vector via call0 */
+    
+    /* Prepare Call0 parameters (a2, a3, a4) for Go function */
+    rsr     a2, EXCCAUSE        // a2 = exccause (first param)
+    rsr     a3, EXCVADDR        // a3 = excvaddr (second param)
+    rsr     a4, 177             // a4 = epc (EPC_1 = 177, third param)
+    
+    /* Call Go handler using call0 (simple, no window management) */
     call0   handleException
-
-    /* If we ever return, park the CPU deterministically */
+    
+    /* If we ever return (should never happen), halt CPU */
 1:
-    waiti   0                   // low‑power idle; safe in EXCM context
+    waiti   0
     j       1b
