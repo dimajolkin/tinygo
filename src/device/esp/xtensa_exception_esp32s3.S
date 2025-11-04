@@ -182,20 +182,15 @@ _xt_level1_int_handler_entry:
 .type _xt_unhandled_exception,@function
 
 _xt_unhandled_exception:
-    /* Save full context */
-    s32i    a2, sp, XT_STK_A2
-    s32i    a3, sp, XT_STK_A3
+    /* Exception frame already set up by vector handler */
     
-    /* Read exception info */
-    rsr     a2, EXCCAUSE
-    rsr     a3, EXCVADDR
-    l32i    a0, sp, XT_STK_PC
+    /* Read exception info into Windowed ABI parameters (a2, a3, a4) */
+    rsr     a2, EXCCAUSE        // a2 = exccause (first param)
+    rsr     a3, EXCVADDR        // a3 = excvaddr (second param)
+    l32i    a4, sp, XT_STK_PC   // a4 = epc (third param)
     
-    /* Call Go handler: handleException(exccause, excvaddr, epc) */
-    mov     a0, a2              // a0 = exccause
-    mov     a1, a3              // a1 = excvaddr  
-    l32i    a2, sp, XT_STK_PC   // a2 = epc
-    call0   handleException
+    /* Call Go handler using call4 (Windowed ABI) */
+    call4   handleException
     
     /* Should never return, but just in case: */
 1:  j       1b

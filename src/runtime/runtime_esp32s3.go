@@ -135,6 +135,9 @@ func disableWatchdogs() {
 
 //export main
 func main() {
+	// MINIMAL TEST: Check if we can even reach main() with Call0 ABI
+	// This will help us isolate if the problem is in call_start_cpu0 or later
+
 	// IMPORTANT: Do NOTHING before clearbss() that requires initialized Go variables!
 	// The .bss section (zero-initialized globals) is not ready yet.
 
@@ -175,13 +178,20 @@ func main() {
 	}
 	print("\n")
 
-	checkVectorsInMemory()
+	//checkVectorsInMemory()
 
 	// Initialize SYSTIMER for system tick
-	initSystimerTick()
+	//initSystimerTick()  // DISABLED: testing exceptions without interrupts
+
+	testUnhandledException()
 
 	// Check if SYSTIMER interrupts are working
-	checkSystemTimer()
+	//checkSystemTimer()  // DISABLED: will test after exception handling works
+
+	// Exception test (DANGEROUS - will halt system!)
+	// Uncomment to verify exception handling:
+	//
+	// testUnhandledException()    // Tests _xt_unhandled_exception handler
 
 	// Call the standard runtime
 	run()
@@ -760,4 +770,71 @@ func checkSystemTimer() {
 	}
 
 	println("=== END TEST ===\n")
+}
+
+// testUnhandledException triggers a real CPU exception to verify the full exception path:
+// CPU → Vector Table → _xt_unhandled_exception → handleException
+// This will cause a fatal exception and halt the system!
+func testUnhandledException() {
+	println("\n=== TESTING EXCEPTION HANDLING (FULL PATH) ===")
+	println("⚠️  This will trigger a REAL CPU EXCEPTION!")
+	println("Expected flow:")
+	println("  1. CPU detects exception")
+	println("  2. CPU jumps to vector table")
+	println("  3. Vector handler calls _xt_unhandled_exception")
+	println("  4. _xt_unhandled_exception calls handleException")
+	println()
+	println("Expected output:")
+	println("  FATAL EXCEPTION!")
+	println("  EXCCAUSE: 0x00000006 (Integer Divide-by-Zero)")
+	println("  EXCVADDR: 0x00000000")
+	println("  EPC: 0x4200XXXX (address of division instruction)")
+	println("  <system halts>")
+	println()
+
+	println("Triggering divide-by-zero exception...")
+	println()
+
+	// Check VECBASE before triggering exception
+	vecbase := device.AsmFull("rsr.vecbase {}", nil)
+	println("DEBUG: VECBASE =", uint32(uintptr(vecbase)))
+
+	// Check PS (should have WOE=0 for Call0)
+	ps := device.AsmFull("rsr.ps {}", nil)
+	println("DEBUG: PS =", uint32(uintptr(ps)))
+	println("DEBUG: PS.INTLEVEL =", uint32(uintptr(ps))&0x0F)
+	println("DEBUG: PS.WOE =", (uint32(uintptr(ps))>>18)&1)
+
+	// Check if vector exists at 0x40000400 (UserExceptionVector)
+	userExcVec := (*uint32)(unsafe.Pointer(uintptr(0x40000400)))
+	println("DEBUG: UserExceptionVector[0x40000400] =", *userExcVec)
+
+	println()
+	println("All checks passed, triggering exception NOW...")
+	println()
+
+	// This will trigger a REAL hardware exception (EXCCAUSE=6)
+	// CPU will automatically:
+	// 1. Save PC to EPC1
+	// 2. Set EXCCAUSE=6
+	// 3. Jump to UserExceptionVector (0x40000400)
+	// 4. Vector handler saves context and calls _xt_unhandled_exception
+	var a uint32 = 100
+	var b uint32 = 0
+
+	println("Executing: result = ", a, " / ", b)
+	println("(next instruction will cause exception)")
+
+	// Use inline assembly to force divide-by-zero
+	// quou = unsigned division (quotient)
+	// This WILL trigger EXCCAUSE=6 (IntegerDivideByZero)
+	device.Asm(
+		"movi a2, 100\n" + // a2 = 100
+			"movi a3, 0\n" + // a3 = 0
+			"quou a2, a2, a3\n", // a2 = a2 / a3 → EXCEPTION!
+	)
+
+	// Should NEVER reach here
+	println("✗ ERROR: Division succeeded!")
+	println("✗ ERROR: Exception was NOT triggered!")
 }

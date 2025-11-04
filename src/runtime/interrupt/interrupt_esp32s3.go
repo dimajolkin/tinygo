@@ -16,7 +16,6 @@ import (
 	"device"
 	"errors"
 	"math/bits"
-	"unsafe"
 	_ "unsafe" // for go:linkname
 )
 
@@ -321,10 +320,6 @@ func SetPS(v uint32) {
 //
 //export handleInterrupt
 func handleInterrupt() {
-	// CRITICAL DEBUG: Signal entry into ISR
-	// GPIO 4 HIGH = entered ISR
-	*(*uint32)(unsafe.Pointer(uintptr(0x60004008))) = (1 << 4) // GPIO_OUT_W1TS_REG: set GPIO4
-
 	// Increment counter
 	handleInterruptCallCount++
 
@@ -345,9 +340,6 @@ func handleInterrupt() {
 			break
 		}
 	}
-
-	// GPIO 4 LOW = exiting ISR
-	*(*uint32)(unsafe.Pointer(uintptr(0x60004014))) = (1 << 4) // GPIO_OUT_W1TC_REG: clear GPIO4
 }
 
 //export handleException
@@ -367,6 +359,12 @@ func handleException(exccause, excvaddr, epc uint32) {
 	for {
 		device.Asm("waiti 0")
 	}
+}
+
+// CallHandleException is a test wrapper to call handleException from Go code.
+// This is useful for testing exception handling without triggering a real exception.
+func CallHandleException(exccause, excvaddr, epc uint32) {
+	handleException(exccause, excvaddr, epc)
 }
 
 func printHex32(val uint32) {
