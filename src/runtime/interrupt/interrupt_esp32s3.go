@@ -313,6 +313,16 @@ func debugGPIO(n int) {
 	*(*uint32)(unsafe.Pointer(uintptr(0x60004008))) = (1 << n)  // GPIO_OUT_W1TS_REG: set GPIO4 high
 }
 
+// DebugGPIO4Set sets GPIO4 high (same as _debug_gpio4_set but from Go)
+// This is the same logic used in all exception/interrupt vectors
+// Can be called from Go code to test GPIO4 functionality
+func DebugGPIO4Set() {
+	// GPIО_ENABLE_REG: enable GPIO4 output
+	*(*uint32)(unsafe.Pointer(uintptr(0x60004024))) |= (1 << 4)
+	// GPIO_OUT_W1TS_REG: set GPIO4 high
+	*(*uint32)(unsafe.Pointer(uintptr(0x60004008))) = (1 << 4)
+}
+
 //export handleException
 func handleException(exccause, excvaddr, epc uint32) {
 	debugGPIO(5)

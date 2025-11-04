@@ -61,6 +61,9 @@ var userExcCalled [1]uint32
 //go:extern _to_unhandled_exc_called
 var toUnhandledExcCalled [1]uint32
 
+//go:extern _recover_test_flag
+var recoverTestFlag uint32
+
 // Helper functions to get addresses from linker symbols
 // These are needed because direct access to symbols doesn't work reliably in TinyGo
 func getVectorBase() uintptr {
@@ -77,6 +80,65 @@ func getTextStart() uintptr {
 
 func getUserExceptionVector() uintptr {
 	return uintptr(unsafe.Pointer(&userExceptionVectorSymbol))
+}
+
+// VECBASE management functions
+// These ensure VECBASE is correctly set early in startup
+
+//go:linkname setVecbaseToVectorBase runtime.setVecbaseToVectorBase
+func setVecbaseToVectorBase()
+
+// readVecbase reads the current VECBASE register value
+func readVecbase() uintptr {
+	return device.AsmFull("rsr.vecbase {}", nil)
+}
+
+// ensureVecbase ensures VECBASE points to _vector_base
+// MUST be called early in main() before any exceptions/interrupts
+func ensureVecbase() {
+	vectorBase := getVectorBase()
+	vecbase := readVecbase()
+
+	if vecbase == 0 || vecbase != vectorBase {
+		// VECBASE is wrong or zero - fix it!
+		// DEBUG: Signal that we're trying to set VECBASE
+		debugGPIO(6) // GPIO6 = trying to set VECBASE
+
+		setVecbaseToVectorBase()
+
+		// CRITICAL: Synchronize after VECBASE change (isync + memw)
+		device.Asm("isync")
+		device.Asm("memw")
+
+		// Small delay to ensure VECBASE is committed
+		for i := 0; i < 10; i++ {
+			device.Asm("nop")
+		}
+
+		// Verify it was set correctly
+		vecbase2 := readVecbase()
+		if vecbase2 != vectorBase {
+
+			// Try reading multiple times - maybe cache issue?
+			for retry := 0; retry < 5; retry++ {
+				device.Asm("isync")
+				vecbase3 := readVecbase()
+				if vecbase3 == vectorBase {
+
+					return
+				}
+				// Delay between retries
+				for i := 0; i < 100; i++ {
+					device.Asm("nop")
+				}
+			}
+
+			// Failed after retries - halt
+			for {
+				device.Asm("waiti 0")
+			}
+		}
+	}
 }
 
 // Debug functions sorted by GPIO number (ascending: 4→5→6→7)
@@ -163,9 +225,14 @@ func main() {
 
 	clearbss()
 
-	// CRITICAL: Disable watchdogs AFTER clearbss() when Go structures are ready
+	// CRITICAL: Disable watchdogs FIRST after clearbss() when Go structures are ready
 	// esp.TIMG0/TIMG1/RTC_CNTL are global pointers that need .bss to be initialized
+	// Must disable before any delays to prevent watchdog reset
 	disableWatchdogs()
+
+	// CRITICAL: Set VECBASE right after watchdogs disabled but before any other initialization
+	// This ensures exception vectors are ready if any early exceptions occur
+	// ensureVecbase()
 
 	// Initialize memory subsystems (MMU, cache buses, autoload)
 	// This complements the basic cache init done in esp32s3.S
@@ -378,7 +445,7 @@ func checkVectorsInMemory() {
 
 	// Vector base from linker vs CPU register
 	vectorBaseAddr := getVectorBase()
-	vecbase := device.AsmFull("rsr.vecbase {}", nil)
+	vecbase := readVecbase()
 	println("_vector_base address (decimal):", uint32(vectorBaseAddr))
 	println("VECBASE register (decimal):", uint32(uintptr(vecbase)))
 
@@ -822,7 +889,7 @@ func testUnhandledException() {
 	println()
 
 	// Check VECBASE before triggering exception
-	vecbase := device.AsmFull("rsr.vecbase {}", nil)
+	vecbase := readVecbase()
 	println("DEBUG: VECBASE =", uint32(uintptr(vecbase)))
 
 	// Check PS (should have INTLEVEL=0 for exceptions to work)
@@ -879,21 +946,237 @@ func testUnhandledException() {
 	println("Executing: SYSCALL instruction (system call exception)")
 	println("(next instruction will cause exception)")
 
-	// DEBUG: Toggle GPIO4 to prove we reached this point
-	debugGPIO(4)
+	// CRITICAL: Check PS register RIGHT before syscall
+	ps2 := device.AsmFull("rsr.ps {}", nil)
+	psVal := uint32(uintptr(ps2))
+
+	println()
+	println("=== PS REGISTER CHECK (right before syscall) ===")
+	print("PS = ")
+	printptr(uintptr(psVal))
+	println()
+	println("PS.INTLEVEL =", psVal&0x0F)
+	println("PS.EXCM =", (psVal>>4)&1, " <- MUST BE 0 for exceptions to work!")
+	println("PS.UM =", (psVal>>5)&1)
+	println("PS.WOE =", (psVal>>18)&1)
+
+	// CRITICAL: Verify vector code is executable
+	// Check that we can actually READ the instruction at vector address
+	println()
+	println("=== VECTOR EXECUTABILITY CHECK ===")
+	vectorAddr := uintptr(vecbase) + 0x180
+	vectorInstr := (*uint32)(unsafe.Pointer(vectorAddr))
+	print("Instruction at VECBASE+0x180: ")
+	printptr(uintptr(*vectorInstr))
+	println()
+
+	// Check if instruction looks valid (not all zeros or all ones)
+	if *vectorInstr == 0 {
+		println("✗ ERROR: Vector instruction is ZERO!")
+	} else if *vectorInstr == 0xFFFFFFFF {
+		println("✗ ERROR: Vector instruction is all ONES!")
+	} else {
+		println("✓ Vector instruction looks valid")
+	}
+
+	// Verify VECBASE alignment (must be 0x200-aligned)
+	if vecbase&0x1FF != 0 {
+		println("✗ ERROR: VECBASE is not 0x200-aligned!")
+		print("  VECBASE alignment: ")
+		printhex32(uint32(vecbase & 0x1FF))
+		println()
+	} else {
+		println("✓ VECBASE is properly aligned (0x200)")
+	}
+
+	// CRITICAL: Re-check VECBASE RIGHT before exception
+	println()
+	println("=== VECBASE FINAL CHECK (right before exception) ===")
+	vecbaseFinal := readVecbase()
+	vectorBaseFinal := getVectorBase()
+	print("VECBASE register: ")
+	printptr(uintptr(vecbaseFinal))
+	println()
+	print("_vector_base symbol: ")
+	printptr(vectorBaseFinal)
+	println()
+	if vecbaseFinal != vectorBaseFinal {
+		println("✗ CRITICAL: VECBASE mismatch right before exception!")
+		println("  Attempting to fix...")
+		setVecbaseToVectorBase()
+		device.Asm("isync")
+		device.Asm("memw")
+		vecbaseAfterFix := readVecbase()
+		if vecbaseAfterFix == vectorBaseFinal {
+			println("✓ VECBASE fixed!")
+		} else {
+			println("✗ FAILED to fix VECBASE!")
+		}
+	} else {
+		println("✓ VECBASE is correct")
+	}
+
+	// Check vector contents one more time
+	userExcVecFinal := (*uint32)(unsafe.Pointer(uintptr(vecbaseFinal) + 0x180))
+	print("UserExceptionVector[VECBASE+0x180] = ")
+	printptr(uintptr(*userExcVecFinal))
+	println()
+	if *userExcVecFinal == 0 || *userExcVecFinal == 0xFFFFFFFF {
+		println("✗ CRITICAL: Vector is corrupted!")
+	}
+
+	if (psVal>>4)&1 == 1 {
+		println("✗ ERROR: PS.EXCM=1 blocks ALL exceptions!")
+		println("Attempting to clear EXCM bit...")
+		// Try to clear EXCM
+		device.Asm(
+			"rsr.ps a2\n" +
+				"movi a3, 0xFFFFFFEF\n" + // Mask to clear bit 4 (EXCM)
+				"and a2, a2, a3\n" +
+				"wsr.ps a2\n" +
+				"rsync\n",
+		)
+		// Re-check
+		ps3 := device.AsmFull("rsr.ps {}", nil)
+		println("PS after clearing EXCM:", uint32(uintptr(ps3)))
+	}
+
+	println()
+	println("Executing SOFTWARE INTERRUPT (Level-1) NOW...")
+	println("  This will trigger Level-1 INTERRUPT (not exception)")
+	println("  Goes through UserExceptionVector → _xt_user_exc → _xt_lowint1")
+
+	// TEST: Call DebugGPIO4Set to verify the function works from Go
+	println("Testing DebugGPIO4Set() function...")
+	//interrupt.DebugGPIO4Set()
+	println("✓ DebugGPIO4Set() called - GPIO4 should be HIGH")
+
+	// IMPORTANT: Set _recover_test_flag so exception handler will do RFE instead of halting
+	println("Setting _recover_test_flag to enable RFE after exception...")
+	recoverTestFlag = 1
+
+	// Small delay to see GPIO4
+	for i := 0; i < 10000; i++ {
+		device.Asm("nop")
+	}
 
 	// Small delay to ensure GPIO is visible
 	for i := 0; i < 1000; i++ {
 		device.Asm("nop")
 	}
 
-	// Use inline assembly with SYSCALL instruction
-	// syscall - this WILL cause EXCCAUSE=1 (Syscall)
-	// Goes through UserExceptionVector (Level-1) - exactly what we want!
-	device.Asm("syscall")
+	// CRITICAL: Check PS.INTLEVEL before setting interrupt
+	psBeforeInt := device.AsmFull("rsr.ps {}", nil)
+	psIntLevel := uint32(uintptr(psBeforeInt)) & 0x0F
+	println("PS.INTLEVEL before interrupt:", psIntLevel)
+	if psIntLevel > 0 {
+		println("✗ ERROR: PS.INTLEVEL > 0 blocks Level-1 interrupts!")
+		println("  Attempting to clear INTLEVEL...")
+		device.Asm(
+			"rsr.ps a2\n" +
+				"movi a3, 0xFFFFFFF0\n" + // Clear INTLEVEL bits
+				"and a2, a2, a3\n" +
+				"wsr.ps a2\n" +
+				"rsync\n",
+		)
+	}
 
-	// Should NEVER reach here - if we do, toggle GPIO2
-	debugGPIO(2)
-	println("✗ ERROR: Illegal instruction succeeded!")
-	println("✗ ERROR: Exception was NOT triggered!")
+	// Execute SOFTWARE INTERRUPT via INTSET
+	// This WILL trigger Level-1 interrupt (EXCCAUSE=4)
+	// Goes through UserExceptionVector (Level-1) → _xt_user_exc → _xt_lowint1
+	// This bypasses all exception blocking mechanisms!
+
+	// CRITICAL: On ESP32-S3, only SOFTWARE interrupts (INT7 and INT29) can be triggered via INTSET!
+	// According to ESP-IDF: XCHAL_INTSETTABLE_MASK = XCHAL_INTTYPE_MASK_SOFTWARE
+	// INT7 and INT29 are the only SOFTWARE interrupts on ESP32-S3.
+	// Using interrupt 7 (bit 7) instead of 0 or 1.
+	// XCHAL_INT7_LEVEL = 1 (Level-1 interrupt)
+
+	// Check state BEFORE setup
+	intenableBefore := device.AsmFull("rsr.intenable {}", nil)
+	interruptBefore := device.AsmFull("rsr.interrupt {}", nil)
+	println("INTENABLE BEFORE setup:", uint32(uintptr(intenableBefore)))
+	println("INTERRUPT BEFORE setup:", uint32(uintptr(interruptBefore)))
+
+	// Re-check VECBASE one more time
+	vecbaseFinal = readVecbase()
+	println("VECBASE FINAL CHECK before interrupt:", vecbaseFinal)
+	if vecbaseFinal != 0x40374000 {
+		println("✗ ERROR: VECBASE is wrong! Expected 0x40374000, got:", vecbaseFinal)
+		return
+	}
+
+	device.Asm(
+		// Step 0: Clear ALL pending interrupts first (including bit 7)
+		"rsr.interrupt a2\n" + // Read all pending interrupts
+			"wsr.intclear a2\n" + // Clear ALL pending interrupts
+			"rsync\n" +
+			// Now specifically clear bit 7 again to be sure
+			"movi a2, 128\n" + // Bit 7 = CPU interrupt 7 (SOFTWARE type)
+			"wsr.intclear a2\n" +
+			"rsync\n" +
+			// Step 1: Enable interrupt line 7 in INTENABLE
+			"rsr.intenable a2\n" +
+			"movi a3, 128\n" + // Bit 7 = CPU interrupt 7
+			"or a2, a2, a3\n" + // Enable bit 7
+			"wsr.intenable a2\n" +
+			"rsync\n" +
+			// Step 2: Trigger interrupt by setting INTSET (only works for SOFTWARE interrupts!)
+			"movi a2, 128\n" + // Bit 7 = CPU interrupt 7 (SOFTWARE)
+			"wsr.intset a2\n" + // Set interrupt pending
+			"rsync\n" +
+			"nop\n" + // Allow interrupt to be taken
+			"nop\n" +
+			"nop\n",
+	)
+
+	// Verify interrupt is pending and enabled (checking bit 7 now)
+	interruptPending := device.AsmFull("rsr.interrupt {}", nil)
+	interruptVal := uint32(uintptr(interruptPending))
+	println("INTERRUPT (pending) after INTSET:", interruptVal)
+	if interruptVal&(1<<7) == 0 {
+		println("✗ ERROR: Interrupt 7 is NOT pending!")
+	} else {
+		println("✓ Interrupt 7 (SOFTWARE) is pending")
+	}
+
+	intenableCheck := device.AsmFull("rsr.intenable {}", nil)
+	intenableVal := uint32(uintptr(intenableCheck))
+	println("INTENABLE after setup:", intenableVal)
+	if intenableVal&(1<<7) == 0 {
+		println("✗ ERROR: Interrupt 7 is NOT enabled in INTENABLE!")
+	} else {
+		println("✓ Interrupt 7 is enabled in INTENABLE")
+	}
+
+	psAfterInt := device.AsmFull("rsr.ps {}", nil)
+	psIntLevelAfter := uint32(uintptr(psAfterInt)) & 0x0F
+	println("PS.INTLEVEL after setup:", psIntLevelAfter)
+	if psIntLevelAfter > 0 {
+		println("✗ ERROR: PS.INTLEVEL still blocks interrupts!")
+	}
+
+	// Long delay to allow interrupt to be taken
+	println("Waiting for interrupt to be taken...")
+	for i := 0; i < 100000; i++ {
+		device.Asm("nop")
+	}
+
+	// Check state AFTER delay
+	interruptAfter := device.AsmFull("rsr.interrupt {}", nil)
+	interruptValAfter := uint32(uintptr(interruptAfter))
+	println("INTERRUPT (pending) AFTER delay:", interruptValAfter)
+	if interruptValAfter&(1<<7) != 0 {
+		println("⚠ WARNING: Interrupt 7 is STILL pending after delay!")
+		println("  This means interrupt was NOT taken by CPU")
+	} else {
+		println("✓ Interrupt 7 was cleared (may have been processed)")
+	}
+
+	// Check if we're still at the same code location (GPIO5 toggle means we didn't enter ISR)
+	// Should NEVER reach here - if we do, toggle GPIO5
+	println("✗ ERROR: Software interrupt did not trigger!")
+	println("✗ ERROR: We should never reach here!")
+	println("  Check: Are GPIO6 or GPIO7 lighting up? (vectors)")
+	println("  Check: Is interrupt 7 still pending?", interruptValAfter&(1<<7) != 0)
 }

@@ -139,7 +139,9 @@ _to_unhandled_exc_called:
 .type       _UserExceptionVector,@function
 .align      4
 _UserExceptionVector:
-    wsr     a0, EXCSAVE_1       /* preserve a0 in EXCSAVE1 */
+    /* DEBUG: Set GPIO4 immediately to signal Level-1 vector entry */
+    /* NOTE: GPIO4 setting moved to _xt_user_exc to avoid literal pool issues */
+    wsr     a0, EXCSAVE_1       /* preserve a0 in EXCSAVE1 first */
     call0   _xt_user_exc        /* jump to user exception handler */
 .size       _UserExceptionVector, . - _UserExceptionVector
 .end        literal_prefix
@@ -151,11 +153,22 @@ _UserExceptionVector:
 .align 4
 .type _xt_user_exc,@function
 _xt_user_exc:
-    /* DEBUG: Toggle GPIO6 to signal we entered _xt_user_exc */
+    /* DEBUG: Set GPIO4 immediately (we're in Level-1 vector!) */
+    /* GPIO4 will light up if ANY exception/interrupt occurs */
     .literal_position
     l32r    a2, .Lgpio_enable_reg
     l32i    a3, a2, 0
-    movi    a4, (1 << 6)
+    movi    a4, (1 << 4)                    /* GPIO4 */
+    or      a3, a3, a4
+    s32i    a3, a2, 0                       /* Enable GPIO4 output */
+    
+    l32r    a2, .Lgpio_set_reg
+    s32i    a4, a2, 0                       /* Set GPIO4 high */
+    
+    /* DEBUG: Also toggle GPIO6 to signal we entered _xt_user_exc */
+    movi    a4, (1 << 6)                    /* GPIO6 */
+    l32r    a2, .Lgpio_enable_reg
+    l32i    a3, a2, 0
     or      a3, a3, a4
     s32i    a3, a2, 0                       /* Enable GPIO6 output */
     
@@ -218,6 +231,17 @@ _xt_to_unhandled_exc:
 .global _xt_lowint1
 _xt_lowint1:
     /* At entry: a0 saved in EXCSAVE_1 by _UserExceptionVector */
+    
+    /* DEBUG: Toggle GPIO7 to signal we entered _xt_lowint1 (Level-1 interrupt) */
+    .literal_position
+    l32r    a2, .Lgpio_enable_reg
+    l32i    a3, a2, 0
+    movi    a4, (1 << 7)
+    or      a3, a3, a4
+    s32i    a3, a2, 0                       /* Enable GPIO7 output */
+    
+    l32r    a2, .Lgpio_set_reg
+    s32i    a4, a2, 0                       /* Set GPIO7 high */
 
     /* Allocate full interrupt stack frame (XT_STK_FRMSZ = 144 bytes) */
     mov     a0, sp                          /* save original SP */
