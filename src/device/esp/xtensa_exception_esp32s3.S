@@ -16,6 +16,17 @@
 
 #include "xtensa_esp32s3_macros.inc"
 
+/* Special Register Numbers (from Xtensa ISA) */
+#define EPC_1           177
+#define EXCSAVE_1       209
+#define PS              230
+#define EXCCAUSE        232
+#define EXCVADDR        238
+#define SAR             3
+#define LBEG            0
+#define LEND            1
+#define LCOUNT          2
+
 .extern _frxt_int_depth
 .extern _frxt_int_handlers
 .extern handleInterrupt
@@ -198,37 +209,107 @@ _xt_level1_int_handler_entry:
     l32i    a0, sp, XT_STK_EXIT
     jx      a0
 
-.section .text._xt_unhandled_exception,"ax",@progbits
-.align 4
-.global _xt_unhandled_exception
-.type _xt_unhandled_exception,@function
 
-/*
- * _xt_unhandled_exception - Default handler for unhandled exceptions
- *
- * Notes:
- *   - Uses Call0 ABI
- *   - Passes (EXCCAUSE, EXCVADDR, EPC) in (a2, a3, a4) to Go
- *   - Calls handleException (Go)
- *   - If handleException returns, the CPU is halted deterministically (waiti loop)
- */
+/* Debug counter for exception handler */
+.section .bss._exception_handler_called, "aw", @nobits
+.align 4
+.global _exception_handler_called
+_exception_handler_called:
+    .space 4
+
+/* Exported globals for last exception info and test flag */
+.section .bss._last_exccause, "aw", @nobits
+.global _last_exccause
+_last_exccause: .space 4
+
+.section .bss._last_excvaddr, "aw", @nobits
+.global _last_excvaddr
+_last_excvaddr: .space 4
+
+.section .bss._last_epc, "aw", @nobits
+.global _last_epc
+_last_epc: .space 4
+
+.section .bss._recover_test_flag, "aw", @nobits
+.global _recover_test_flag
+_recover_test_flag: .space 4
+
 .section .text._xt_unhandled_exception,"ax",@progbits
 .align 4
 .global _xt_unhandled_exception
 .type _xt_unhandled_exception,@function
 
 _xt_unhandled_exception:
-    /* Called from vector via call0 */
-    
+    /* Debug GPIO toggle at entry (GPIO2, bit 2 of GPIO_OUT_REG 0x60004000) */
+    movi    a2, 0x60004000
+    l32i    a3, a2, 0
+    movi    a4, (1<<2)
+    xor     a3, a3, a4
+    s32i    a3, a2, 0
+
+    /* DEBUG: Increment counter to prove we got here */
+    .literal_position
+    l32r    a5, .Lexc_counter_addr
+    l32i    a6, a5, 0
+    addi    a6, a6, 1
+    s32i    a6, a5, 0
+
+    /* Save exception info to global variables */
+    rsr     a7, EXCCAUSE
+    movi    a8, _last_exccause
+    s32i    a7, a8, 0
+    rsr     a7, EXCVADDR
+    movi    a8, _last_excvaddr
+    s32i    a7, a8, 0
+    rsr     a7, EPC_1
+    movi    a8, _last_epc
+    s32i    a7, a8, 0
+
+    /* Create minimal exception frame on stack (ESP-IDF style) */
+    mov     a5, sp                      // Save original SP
+    addi    sp, sp, -32                 // Allocate 32 bytes (8 words) for minimal frame
+    s32i    a5, sp, 0                   // Save original SP
+
+    rsr     a6, PS
+    s32i    a6, sp, 4                   // Save PS
+    rsr     a6, EPC_1
+    s32i    a6, sp, 8                   // Save PC (EPC_1)
+    rsr     a6, EXCSAVE_1
+    s32i    a6, sp, 12                  // Save a0
+    rsr     a6, EXCCAUSE
+    s32i    a6, sp, 16                  // Save EXCCAUSE
+    rsr     a6, EXCVADDR
+    s32i    a6, sp, 20                  // Save EXCVADDR
+
+    /* Setup PS for C code (Call0 ABI: INTLEVEL + UM, no WOE) */
+    movi    a6, 0x00060020              // PS_INTLEVEL(6) | PS_UM
+    wsr     a6, PS
+    rsync
+
     /* Prepare Call0 parameters (a2, a3, a4) for Go function */
-    rsr     a2, EXCCAUSE        // a2 = exccause (first param)
-    rsr     a3, EXCVADDR        // a3 = excvaddr (second param)
-    rsr     a4, 177             // a4 = epc (EPC_1 = 177, third param)
-    
-    /* Call Go handler using call0 (simple, no window management) */
+    rsr     a2, EXCCAUSE                // a2 = exccause (first param)
+    rsr     a3, EXCVADDR                // a3 = excvaddr (second param)
+    rsr     a4, EPC_1                   // a4 = epc (third param)
+
+    /* Call Go handler using call0 */
     call0   handleException
-    
-    /* If we ever return (should never happen), halt CPU */
+
+    /* Restore SP after handleException returns */
+    l32i    sp, sp, 0                   // Restore SP
+
+    /* Check _recover_test_flag: if set, try to recover by advancing EPC1 and rfe */
+    movi    a8, _recover_test_flag
+    l32i    a7, a8, 0
+    beqz    a7, 1f
+    rsr     a2, EPC_1
+    addi    a2, a2, 2
+    wsr     a2, EPC_1
+    rfe
 1:
     waiti   0
     j       1b
+
+/* Literal pool for _xt_unhandled_exception */
+.align 4
+.Lexc_counter_addr:
+    .word _exception_handler_called

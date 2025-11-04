@@ -15,7 +15,7 @@ package interrupt
 import (
 	"device"
 	"errors"
-	"math/bits"
+	"unsafe"
 	_ "unsafe" // for go:linkname
 )
 
@@ -279,86 +279,59 @@ func SetPS(v uint32) {
 // Inserted for hardware debug/validation in runtime_esp32s3.go
 
 // handleInterrupt - главный диспетчер прерываний для ESP32-S3 (ESP-IDF style)
-// Вызывается напрямую из ассемблерного Level-1 вектора (_xt_lowint1)
-//
-// NO PARAMETERS: диспетчер сам читает INTERRUPT & INTENABLE и обрабатывает все pending биты
-//
-// NOTE:
-//   - The CPU *request* bit is NOT automatically cleared by hardware when taking the interrupt.
-//   - Handler MUST deassert the source: for level-sensitive sources — clear peripheral flag; for edge/software — write INTCLEAR for the CPU line.
-//
-// Example usage:
-//
-//	package main
-//
-//	import (
-//		"device/esp"
-//		"machine/interrupt"
-//	)
-//
-//	func onTimerInterrupt(interrupt.Interrupt) {
-//		// Clear the peripheral interrupt source (level-sensitive)
-//		esp.SYSTIMER.INT_CLR.Set(1 << 0)
-//		// Perform periodic task
-//	}
-//
-//	func main() {
-//		// Initialize SYSTIMER or peripheral
-//		// Configure and enable interrupt line 23 (SYSTIMER)
-//		intr := interrupt.New(23, onTimerInterrupt)
-//		intr.Enable()
-//		// Start timer and enable target 0 compare event
-//		esp.SYSTIMER.SetCONF_TARGET0_WORK_EN(1)
-//		for {
-//			device.Asm("waiti 0") // Sleep until next interrupt
-//		}
-//	}
-//
-// This demonstrates a level-sensitive interrupt (SYSTIMER). The handler must
-// clear its peripheral flag to avoid retriggering. For edge/software interrupts,
-// call clearCpuInterrupt(n) instead.
 //
 //export handleInterrupt
 func handleInterrupt() {
+	debugGPIO(7)
 	// Increment counter
 	handleInterruptCallCount++
 
 	// Generic Level-1 dispatcher per ISA: service all currently pending & enabled bits.
 	// We recompute the mask each iteration to catch new arrivals during servicing.
-	for tries := 0; tries < 8; tries++ { // simple bound to avoid livelock in case of flapping sources
-		pend := pendingCPU()
-		if pend == 0 {
-			break
-		}
-		// Find lowest set bit using bits.TrailingZeros32
-		bit := uint32(bits.TrailingZeros32(pend))
-		if bit < 32 {
-			// Call registered handler; peripheral handler must clear its own flag
-			// For SW/edge sources, handler may call clearCpuInterrupt(bit)
-			callHandler(int(bit))
-		} else {
-			break
-		}
-	}
+	//for tries := 0; tries < 8; tries++ { // simple bound to avoid livelock in case of flapping sources
+	//	pend := pendingCPU()
+	//	if pend == 0 {
+	//		break
+	//	}
+	//	// Find lowest set bit using bits.TrailingZeros32
+	//	bit := uint32(bits.TrailingZeros32(pend))
+	//	if bit < 32 {
+	//		// Call registered handler; peripheral handler must clear its own flag
+	//		// For SW/edge sources, handler may call clearCpuInterrupt(bit)
+	//		callHandler(int(bit))
+	//	} else {
+	//		break
+	//	}
+	//}
+}
+
+// DEBUG: Counter to track if handleException is called
+var handleExceptionCallCount uint32
+
+func debugGPIO(n int) {
+	*(*uint32)(unsafe.Pointer(uintptr(0x60004024))) |= (1 << n) // GPIO_ENABLE_REG: enable GPIO4 output
+	*(*uint32)(unsafe.Pointer(uintptr(0x60004008))) = (1 << n)  // GPIO_OUT_W1TS_REG: set GPIO4 high
 }
 
 //export handleException
 func handleException(exccause, excvaddr, epc uint32) {
+	debugGPIO(5)
+	//handleExceptionCallCount++
 	// Handle fatal exceptions
 	// This should never return
-	print("FATAL EXCEPTION!\n")
-	print("EXCCAUSE: ")
-	printHex32(exccause)
-	print("\nEXCVADDR: ")
-	printHex32(excvaddr)
-	print("\nEPC: ")
-	printHex32(epc)
-	print("\n")
+	//print("FATAL EXCEPTION!\n")
+	//print("EXCCAUSE: ")
+	//printHex32(exccause)
+	//print("\nEXCVADDR: ")
+	//printHex32(excvaddr)
+	//print("\nEPC: ")
+	//printHex32(epc)
+	//print("\n")
 
 	// Halt forever
-	for {
-		device.Asm("waiti 0")
-	}
+	//for {
+	//	device.Asm("waiti 0")
+	//}
 }
 
 // CallHandleException is a test wrapper to call handleException from Go code.

@@ -66,3 +66,67 @@ runtime.getVecbase:
 
 .size runtime.getVecbase, .-runtime.getVecbase
 
+
+// ============================================================================
+// void copyVectorsToIRAM()
+// Copies interrupt vectors from Flash (LMA) to IRAM (VMA) 
+// MUST be called BEFORE setting VECBASE!
+//
+// Linker provides:
+//   _vector_base        = 0x40374000 (VMA in IRAM)
+//   _vectors_flash_start = LOADADDR(.vectors) (LMA in Flash)
+//   _vectors_end         = end of vectors in IRAM
+// ============================================================================
+.section .text.copyVectorsToIRAM
+.global copyVectorsToIRAM
+.type copyVectorsToIRAM,@function
+.align 4
+
+.extern _vector_base
+.extern _vectors_end
+.extern _vectors_flash_start
+
+copyVectorsToIRAM:
+    // Load addresses from linker symbols
+    movi    a2, 0x40374000              // a2 = _vector_base (IRAM destination)
+    
+    // Load _vectors_flash_start (Flash source)
+    .literal_position
+    l32r    a3, .Lvectors_flash_addr
+    l32i    a3, a3, 0                   // a3 = _vectors_flash_start (Flash source)
+    
+    // Load _vectors_end (end of IRAM region)
+    l32r    a4, .Lvectors_end_addr
+    l32i    a4, a4, 0                   // a4 = _vectors_end
+    
+    // Calculate size in bytes: size = _vectors_end - _vector_base
+    sub     a5, a4, a2                  // a5 = size in bytes
+    
+    // Convert to word count (divide by 4)
+    srli    a5, a5, 2                   // a5 = size / 4 (word count)
+    
+    // Copy loop: copy word by word from Flash to IRAM
+    beqz    a5, .Lcopy_done             // if size == 0, skip
+.Lcopy_loop:
+    l32i    a6, a3, 0                   // Load word from Flash
+    s32i    a6, a2, 0                   // Store word to IRAM
+    addi    a3, a3, 4                   // Advance Flash pointer
+    addi    a2, a2, 4                   // Advance IRAM pointer
+    addi    a5, a5, -1                  // Decrement counter
+    bnez    a5, .Lcopy_loop             // Loop if counter != 0
+    
+.Lcopy_done:
+    // Memory barrier to ensure all writes complete
+    memw
+    
+    ret                                 // return (Call0 ABI)
+
+// Literal pool
+.align 4
+.Lvectors_flash_addr:
+    .word _vectors_flash_start
+.Lvectors_end_addr:
+    .word _vectors_end
+
+.size copyVectorsToIRAM, .-copyVectorsToIRAM
+

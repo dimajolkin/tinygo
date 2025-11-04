@@ -114,6 +114,19 @@ _frxt_int_depth:
 _isr_call_count:
     .space 4
 
+/* Debug counters for exception path tracking */
+.section .bss._user_exc_called, "aw", @nobits
+.align 4
+.global _user_exc_called
+_user_exc_called:
+    .space 4
+
+.section .bss._to_unhandled_exc_called, "aw", @nobits
+.align 4
+.global _to_unhandled_exc_called
+_to_unhandled_exc_called:
+    .space 4
+
 
 /*
  * User Exception Vector (Level-1) - handles all Level-1 interrupts and exceptions
@@ -138,6 +151,23 @@ _UserExceptionVector:
 .align 4
 .type _xt_user_exc,@function
 _xt_user_exc:
+    /* DEBUG: Toggle GPIO6 to signal we entered _xt_user_exc */
+    .literal_position
+    l32r    a2, .Lgpio_enable_reg
+    l32i    a3, a2, 0
+    movi    a4, (1 << 6)
+    or      a3, a3, a4
+    s32i    a3, a2, 0                       /* Enable GPIO6 output */
+    
+    l32r    a2, .Lgpio_set_reg
+    s32i    a4, a2, 0                       /* Set GPIO6 high */
+    
+    /* DEBUG: Mark that we got to _xt_user_exc (use counter) */
+    l32r    a2, .Luser_exc_addr
+    l32i    a3, a2, 0
+    addi    a3, a3, 1
+    s32i    a3, a2, 0
+    
     /* Check if this is a Level-1 interrupt (EXCCAUSE == 4) */
     rsr     a0, EXCSAVE_1                   /* restore a0 saved by vector entry */
     rsr     a3, EXCCAUSE                    /* read EXCCAUSE into a3 */
@@ -147,9 +177,41 @@ _xt_user_exc:
 /* Trampoline for unhandled exception (must be close for bnei) */
 .align 4
 _xt_to_unhandled_exc:
-    call0   _xt_unhandled_exception         /* long jump to real handler (Call0 from vector) */
+    /* DEBUG: Toggle GPIO4 to signal we entered _xt_to_unhandled_exc */
+    .literal_position
+    l32r    a2, .Lgpio_enable_reg
+    l32i    a3, a2, 0
+    movi    a4, (1 << 4)
+    or      a3, a3, a4
+    s32i    a3, a2, 0                       /* Enable GPIO4 output */
+    
+    l32r    a2, .Lgpio_set_reg
+    s32i    a4, a2, 0                       /* Set GPIO4 high */
+    
+    /* DEBUG: Mark that we got to _xt_to_unhandled_exc (use counter) */
+    l32r    a2, .Lto_unhandled_addr
+    l32i    a3, a2, 0
+    addi    a3, a3, 1
+    s32i    a3, a2, 0
+    
+    /* CRITICAL: Use 'j' (jump) NOT 'call0' to avoid overwriting a0!
+     * a0 contains the original register value that we need to preserve.
+     * call0 would overwrite a0 with return address, losing the original value.
+     */
+    j       _xt_unhandled_exception         /* jump to real handler (preserves a0) */
 
 .size       _xt_user_exc, . - _xt_user_exc
+
+/* Literal pool for _xt_user_exc debug counters and GPIO */
+.align 4
+.Lgpio_enable_reg:
+    .word 0x60004024                    /* GPIO_ENABLE_REG */
+.Lgpio_set_reg:
+    .word 0x60004008                    /* GPIO_OUT_W1TS_REG */
+.Luser_exc_addr:
+    .word _user_exc_called
+.Lto_unhandled_addr:
+    .word _to_unhandled_exc_called
 
 /* Low-level level-1 interrupt entry: ESP-IDF compatible version */
 .align 4

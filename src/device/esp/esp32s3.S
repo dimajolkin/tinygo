@@ -64,6 +64,10 @@ call_start_cpu0:
     wsr.cpenable a2
     rsync
 
+    // NOTE: Vectors are already in IRAM (esptool/bootloader places them there)
+    // No need to copy. See checkVectorsInMemory() output - vectors are present!
+    // call0 copyVectorsToIRAM  // DISABLED - not needed
+
     // Set VECBASE to point to interrupt vectors in IRAM
     call0 runtime.setVecbaseToVectorBase
 

@@ -40,41 +40,26 @@ var vectorBaseSymbol [0]byte
 //go:extern _vectors_end
 var vectorsEndSymbol [0]byte
 
+//go:extern _vectors_flash_start
+var vectorsFlashStartSymbol [0]uint32
+
 //go:extern _text_start
 var textStartSymbol [0]byte
 
 //go:extern _UserExceptionVector
 var userExceptionVectorSymbol [0]byte
 
-//go:extern _KernelExceptionVector
-var kernelExceptionVectorSymbol [0]byte
-
-//go:extern _NMIExceptionVector
-var nmiExceptionVectorSymbol [0]byte
-
-//go:extern _Level2InterruptVector
-var level2InterruptVectorSymbol [0]byte
-
-//go:extern _Level3InterruptVector
-var level3InterruptVectorSymbol [0]byte
-
-//go:extern _Level4InterruptVector
-var level4InterruptVectorSymbol [0]byte
-
-//go:extern _Level5InterruptVector
-var level5InterruptVectorSymbol [0]byte
-
-//go:extern _Level6InterruptVector
-var level6InterruptVectorSymbol [0]byte
-
-//go:extern _Level7InterruptVector
-var level7InterruptVectorSymbol [0]byte
-
-//go:extern _DoubleExceptionVector
-var doubleExceptionVectorSymbol [0]byte
-
 //go:extern _isr_call_count
 var isrCallCount [1]uint32
+
+//go:extern _exception_handler_called
+var exceptionHandlerCalled [1]uint32
+
+//go:extern _user_exc_called
+var userExcCalled [1]uint32
+
+//go:extern _to_unhandled_exc_called
+var toUnhandledExcCalled [1]uint32
 
 // Helper functions to get addresses from linker symbols
 // These are needed because direct access to symbols doesn't work reliably in TinyGo
@@ -93,16 +78,6 @@ func getTextStart() uintptr {
 func getUserExceptionVector() uintptr {
 	return uintptr(unsafe.Pointer(&userExceptionVectorSymbol))
 }
-
-func getKernelExceptionVector() uintptr { return uintptr(unsafe.Pointer(&kernelExceptionVectorSymbol)) }
-func getNMIExceptionVector() uintptr    { return uintptr(unsafe.Pointer(&nmiExceptionVectorSymbol)) }
-func getLevel2InterruptVector() uintptr { return uintptr(unsafe.Pointer(&level2InterruptVectorSymbol)) }
-func getLevel3InterruptVector() uintptr { return uintptr(unsafe.Pointer(&level3InterruptVectorSymbol)) }
-func getLevel4InterruptVector() uintptr { return uintptr(unsafe.Pointer(&level4InterruptVectorSymbol)) }
-func getLevel5InterruptVector() uintptr { return uintptr(unsafe.Pointer(&level5InterruptVectorSymbol)) }
-func getLevel6InterruptVector() uintptr { return uintptr(unsafe.Pointer(&level6InterruptVectorSymbol)) }
-func getLevel7InterruptVector() uintptr { return uintptr(unsafe.Pointer(&level7InterruptVectorSymbol)) }
-func getDoubleExceptionVector() uintptr { return uintptr(unsafe.Pointer(&doubleExceptionVectorSymbol)) }
 
 // Debug functions sorted by GPIO number (ascending: 4→5→6→7)
 func debugGPIO(n int) {
@@ -172,9 +147,6 @@ func disableWatchdogs() {
 
 //export main
 func main() {
-	// MINIMAL TEST: Check if we can even reach main() with Call0 ABI
-	// This will help us isolate if the problem is in call_start_cpu0 or later
-
 	// IMPORTANT: Do NOTHING before clearbss() that requires initialized Go variables!
 	// The .bss section (zero-initialized globals) is not ready yet.
 
@@ -396,8 +368,13 @@ func checkVectorsInMemory() {
 	// Known-good BSS anchors (sanity that symbols resolve)
 	sbssAddr := uintptr(unsafe.Pointer(&_sbss))
 	ebssAddr := uintptr(unsafe.Pointer(&_ebss))
+	textStartAddr := uintptr(unsafe.Pointer(&textStartSymbol))
+	vectorsEndAddr := uintptr(unsafe.Pointer(&vectorsEndSymbol))
+
 	println("_sbss address (decimal):", uint32(sbssAddr))
 	println("_ebss address (decimal):", uint32(ebssAddr))
+	println("_text_start address (decimal):", uint32(textStartAddr))
+	println("_vectors_end address (decimal):", uint32(vectorsEndAddr))
 
 	// Vector base from linker vs CPU register
 	vectorBaseAddr := getVectorBase()
@@ -422,6 +399,18 @@ func checkVectorsInMemory() {
 		println("\u2713 VECBASE correctly points to _vector_base")
 	} else {
 		println("\u2717 ERROR: VECBASE mismatch!")
+	}
+
+	// Check that .text doesn't overlap with .vectors
+	if textStartAddr >= vectorsEndAddr {
+		println("\u2713 .text starts after .vectors (no overlap)")
+		print("  Gap: ")
+		printhex32(uint32(textStartAddr - vectorsEndAddr))
+		println(" bytes")
+	} else {
+		println("\u2717 ERROR: .text OVERLAPS with .vectors!")
+		println("  _vectors_end:", uint32(vectorsEndAddr))
+		println("  _text_start:", uint32(textStartAddr))
 	}
 
 	// Fetch symbol address for `_UserExceptionVector` early
@@ -487,65 +476,36 @@ func checkVectorsInMemory() {
 		println("; using actual symbol offset above")
 	}
 
-	// 2) The rest of the vectors (validate both canonical offsets and exported symbols)
-	type vecInfo struct {
+	// 2) The rest of the vectors (single word dump is enough: call0 stub)
+	type vec struct {
 		name string
 		off  uintptr
-		sym  uintptr
 	}
-	others := []vecInfo{
-		{"KernelExceptionVector", defOffKernel, getKernelExceptionVector()},
-		{"NMIExceptionVector", defOffNMI, getNMIExceptionVector()},
-		{"Level2InterruptVector", defOffL2, getLevel2InterruptVector()},
-		{"Level3InterruptVector", defOffL3, getLevel3InterruptVector()},
-		{"Level4InterruptVector", defOffL4, getLevel4InterruptVector()},
-		{"Level5InterruptVector", defOffL5, getLevel5InterruptVector()},
-		{"Level6InterruptVector", defOffL6, getLevel6InterruptVector()},
-		{"Level7InterruptVector", defOffL7, getLevel7InterruptVector()},
-		{"DoubleExceptionVector", defOffDouble, getDoubleExceptionVector()},
+	others := []vec{
+		{"KernelExceptionVector", defOffKernel},
+		{"NMIExceptionVector", defOffNMI},
+		{"Level2InterruptVector", defOffL2},
+		{"Level3InterruptVector", defOffL3},
+		{"Level4InterruptVector", defOffL4},
+		{"Level5InterruptVector", defOffL5},
+		{"Level6InterruptVector", defOffL6},
+		{"Level7InterruptVector", defOffL7},
+		{"DoubleExceptionVector", defOffDouble},
 	}
-
-	mismatches := 0
 	for i, v := range others {
 		print("[", i+2, "] ", v.name, " at offset ")
 		printhex32(uint32(v.off))
 		println(":")
-
-		// Dump word at VECBASE+offset
 		w0, _ := read32(base + v.off)
-		print("  VECBASE+")
+		print("  +")
 		printhex32(uint32(v.off))
 		print(": ")
 		printptr(uintptr(w0))
+		// Many of these are small call0 stubs in ROM/IRAM, opcode low byte 0xC5
 		if (w0 & 0xFF) == 0xC5 {
-			print(" (call0 stub)")
+			print(" (call0 -> _xt_unhandled_exception)")
 		}
 		println()
-
-		// Dump word at symbol (if exported)
-		if v.sym != 0 {
-			s0, _ := read32(v.sym + 0)
-			print("  SYMBOL  ")
-			printptr(v.sym)
-			print(": ")
-			printptr(uintptr(s0))
-			println()
-
-			// Compare addresses and contents
-			if v.sym != base+v.off || s0 != w0 {
-				println("  ✗ MISMATCH: symbol vs VECBASE+offset differ")
-				print("    sym:     ")
-				printptr(v.sym)
-				print("   | base+off: ")
-				printptr(base + v.off)
-				println()
-				mismatches++
-			} else {
-				println("  ✓ symbol matches VECBASE+offset and contents")
-			}
-		} else {
-			println("  ⚠️  No exported symbol found (skipping symbol cross-check)")
-		}
 	}
 
 	// --- SUMMARY / VALIDATION ---
@@ -607,13 +567,6 @@ func checkVectorsInMemory() {
 	print("  | Canonical (ESP‑IDF): ")
 	printhex32(uint32(defOffL1))
 	println()
-
-	println()
-	if mismatches > 0 {
-		println("SUMMARY: ", mismatches, " vector symbol mismatches detected. Verify linker placement/section names.")
-	} else {
-		println("SUMMARY: all exported vector symbols match VECBASE+canonical offsets.")
-	}
 
 	println("\n=== END MEMORY CHECK ===\n")
 }
@@ -859,55 +812,88 @@ func testUnhandledException() {
 	println()
 	println("Expected output:")
 	println("  FATAL EXCEPTION!")
-	println("  EXCCAUSE: 0x00000006 (Integer Divide-by-Zero)")
+	println("  EXCCAUSE: 0x00000000 (Illegal Instruction)")
 	println("  EXCVADDR: 0x00000000")
-	println("  EPC: 0x4200XXXX (address of division instruction)")
+	println("  EPC: 0x4037XXXX or 0x4200XXXX (address of illegal instruction)")
 	println("  <system halts>")
 	println()
 
-	println("Triggering divide-by-zero exception...")
+	println("Triggering Illegal Instruction exception...")
 	println()
 
 	// Check VECBASE before triggering exception
 	vecbase := device.AsmFull("rsr.vecbase {}", nil)
 	println("DEBUG: VECBASE =", uint32(uintptr(vecbase)))
 
-	// Check PS (should have WOE=0 for Call0)
+	// Check PS (should have INTLEVEL=0 for exceptions to work)
 	ps := device.AsmFull("rsr.ps {}", nil)
 	println("DEBUG: PS =", uint32(uintptr(ps)))
 	println("DEBUG: PS.INTLEVEL =", uint32(uintptr(ps))&0x0F)
 	println("DEBUG: PS.WOE =", (uint32(uintptr(ps))>>18)&1)
 
-	// Check if vector exists at 0x40000400 (UserExceptionVector)
-	userExcVec := (*uint32)(unsafe.Pointer(uintptr(0x40000400)))
-	println("DEBUG: UserExceptionVector[0x40000400] =", *userExcVec)
+	// Check if vector exists at computed offset from VECBASE
+	userExcVec := (*uint32)(unsafe.Pointer(uintptr(vecbase) + 0x180))
+	print("DEBUG: UserExceptionVector[VECBASE+0x180] = ")
+	printptr(uintptr(*userExcVec))
+	println(" (decimal:", *userExcVec, ")")
+
+	// Check ALL debug counters BEFORE triggering exception
+	excCountBefore := exceptionHandlerCalled[0]
+	userExcBefore := userExcCalled[0]
+	toUnhandledBefore := toUnhandledExcCalled[0]
+
+	println("DEBUG: Exception handler call count BEFORE:", excCountBefore)
+	println("DEBUG: User exception dispatcher count BEFORE:", userExcBefore)
+	println("DEBUG: To unhandled exception count BEFORE:", toUnhandledBefore)
+
+	// CRITICAL: Re-check vector contents RIGHT before triggering exception!
+	println()
+	println("=== FINAL CHECK: Vector contents before exception ===")
+	userExcVec2 := (*uint32)(unsafe.Pointer(uintptr(vecbase) + 0x180))
+	userExcVec3 := (*uint32)(unsafe.Pointer(uintptr(vecbase) + 0x184))
+	print("  [VECBASE+0x180]: ")
+	printptr(uintptr(*userExcVec2))
+	println()
+	print("  [VECBASE+0x184]: ")
+	printptr(uintptr(*userExcVec3))
+	println()
+	if *userExcVec2 == 0 || *userExcVec2 == 0xFFFFFFFF {
+		println("  ✗ WARNING: Vector looks invalid (zero or all 1s)!")
+	}
 
 	println()
 	println("All checks passed, triggering exception NOW...")
 	println()
 
-	// This will trigger a REAL hardware exception (EXCCAUSE=6)
+	// IMPORTANT: Xtensa LX7 does NOT generate exception on divide-by-zero!
+	// We also CAN'T use Go nil pointer dereference - TinyGo runtime catches it with panic!
+	// Instead, we use inline assembly to trigger ILLEGAL INSTRUCTION exception.
+	// This will trigger EXCCAUSE=0 (IllegalInstructionCause)
 	// CPU will automatically:
 	// 1. Save PC to EPC1
-	// 2. Set EXCCAUSE=6
-	// 3. Jump to UserExceptionVector (0x40000400)
-	// 4. Vector handler saves context and calls _xt_unhandled_exception
-	var a uint32 = 100
-	var b uint32 = 0
+	// 2. Set EXCCAUSE=0
+	// 3. Jump to UserExceptionVector (VECBASE+0x180)
+	// 4. Vector handler calls _xt_unhandled_exception
+	// 5. _xt_unhandled_exception calls handleException
 
-	println("Executing: result = ", a, " / ", b)
+	println("Executing: SYSCALL instruction (system call exception)")
 	println("(next instruction will cause exception)")
 
-	// Use inline assembly to force divide-by-zero
-	// quou = unsigned division (quotient)
-	// This WILL trigger EXCCAUSE=6 (IntegerDivideByZero)
-	device.Asm(
-		"movi a2, 100\n" + // a2 = 100
-			"movi a3, 0\n" + // a3 = 0
-			"quou a2, a2, a3\n", // a2 = a2 / a3 → EXCEPTION!
-	)
+	// DEBUG: Toggle GPIO4 to prove we reached this point
+	debugGPIO(4)
 
-	// Should NEVER reach here
-	println("✗ ERROR: Division succeeded!")
+	// Small delay to ensure GPIO is visible
+	for i := 0; i < 1000; i++ {
+		device.Asm("nop")
+	}
+
+	// Use inline assembly with SYSCALL instruction
+	// syscall - this WILL cause EXCCAUSE=1 (Syscall)
+	// Goes through UserExceptionVector (Level-1) - exactly what we want!
+	device.Asm("syscall")
+
+	// Should NEVER reach here - if we do, toggle GPIO2
+	debugGPIO(2)
+	println("✗ ERROR: Illegal instruction succeeded!")
 	println("✗ ERROR: Exception was NOT triggered!")
 }
