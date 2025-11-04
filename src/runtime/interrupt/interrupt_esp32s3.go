@@ -16,6 +16,7 @@ import (
 	"device"
 	"errors"
 	"math/bits"
+	"unsafe"
 	_ "unsafe" // for go:linkname
 )
 
@@ -115,7 +116,6 @@ func SetPSIntLevel(level int) {
 	lvl := uint32(level & 0x0F)
 	cur := get_ps()
 	curLvl := cur & 0x0F
-
 	if lvl == curLvl {
 		return
 	}
@@ -133,7 +133,7 @@ func SetPSIntLevel(level int) {
 		return
 	}
 
-	// Lowering mask
+	// Lowering mask (including to 0)
 	if lvl == 0 {
 		rsil_0()
 		return
@@ -321,6 +321,10 @@ func SetPS(v uint32) {
 //
 //export handleInterrupt
 func handleInterrupt() {
+	// CRITICAL DEBUG: Signal entry into ISR
+	// GPIO 4 HIGH = entered ISR
+	*(*uint32)(unsafe.Pointer(uintptr(0x60004008))) = (1 << 4) // GPIO_OUT_W1TS_REG: set GPIO4
+
 	// Increment counter
 	handleInterruptCallCount++
 
@@ -341,6 +345,9 @@ func handleInterrupt() {
 			break
 		}
 	}
+
+	// GPIO 4 LOW = exiting ISR
+	*(*uint32)(unsafe.Pointer(uintptr(0x60004014))) = (1 << 4) // GPIO_OUT_W1TC_REG: clear GPIO4
 }
 
 //export handleException
