@@ -20,42 +20,67 @@ import (
 )
 
 // Assembly helper functions from interrupt_helpers_esp32s3.S
-// Using go:linkname to link to ASM symbols without package prefix
+// Using direct inline assembly wrappers for reliability (bypasses go:linkname issues)
 
-//go:linkname read_interrupt __tg_read_interrupt
-func read_interrupt() uint32
+func read_interrupt() uint32 {
+	result := device.AsmFull("rsr.interrupt {}", nil)
+	return uint32(uintptr(result))
+}
 
-//go:linkname read_intenable __tg_read_intenable
-func read_intenable() uint32
+func read_intenable() uint32 {
+	result := device.AsmFull("rsr.intenable {}", nil)
+	return uint32(uintptr(result))
+}
 
-//go:linkname write_intenable __tg_write_intenable
-func write_intenable(v uint32)
+func write_intenable(v uint32) {
+	device.AsmFull("wsr.intenable {val}; rsync", map[string]interface{}{"val": uintptr(v)})
+}
 
-//go:linkname write_intset __tg_write_intset
-func write_intset(v uint32)
+func write_intset(v uint32) {
+	device.AsmFull("wsr.intset {val}; rsync", map[string]interface{}{"val": uintptr(v)})
+}
 
-//go:linkname write_intclear __tg_write_intclear
-func write_intclear(v uint32)
+func write_intclear(v uint32) {
+	device.AsmFull("wsr.intclear {val}; rsync", map[string]interface{}{"val": uintptr(v)})
+}
 
-//go:linkname get_ps __tg_get_ps
-func get_ps() uint32
+func get_ps() uint32 {
+	result := device.AsmFull("rsr.ps {}", nil)
+	return uint32(uintptr(result))
+}
 
-//go:linkname set_ps __tg_set_ps
-func set_ps(v uint32)
+func set_ps(v uint32) {
+	device.AsmFull("wsr.ps {val}; rsync", map[string]interface{}{"val": uintptr(v)})
+}
 
-//go:linkname rsil_0 __tg_rsil_0
-func rsil_0() uint32
+func rsil_0() uint32 {
+	result := device.AsmFull("rsil {}, 0", nil)
+	return uint32(uintptr(result))
+}
 
-//go:linkname rsil_1 __tg_rsil_1
-func rsil_1() uint32
+func rsil_1() uint32 {
+	result := device.AsmFull("rsil {}, 1", nil)
+	return uint32(uintptr(result))
+}
 
-//go:linkname rsil_15 __tg_rsil_15
-func rsil_15() uint32
+func rsil_15() uint32 {
+	result := device.AsmFull("rsil {}, 15", nil)
+	return uint32(uintptr(result))
+}
 
-// State represents the previous INTLEVEL value (bits [3:0] of PS register on Xtensa).
-// We store only INTLEVEL, not the entire PS register, to avoid clobbering other PS bits
-// that may have changed between Disable() and Restore() (like CALLINC, WOE, etc.)
-type State uintptr
+func rsil_set(level uint32) uint32 {
+	// Manual implementation using rsr/wsr (same as __tg_rsil_set)
+	oldPS := get_ps()
+	newPS := (oldPS &^ 0x0F) | (level & 0x0F)
+	set_ps(newPS)
+	return oldPS
+}
+
+// State holds a full snapshot of the PS register returned by RSIL.
+// Only the INTLEVEL field (bits [3:0]) is used on Restore(), the rest of PS
+// is preserved as-is by hardware and not modified by software.
+// Using uint32 matches the XTensa PS register width.
+type State uint32
 
 // Enable enables this interrupt. Right after calling this function, the
 // interrupt may be invoked if it was already pending.
@@ -63,12 +88,11 @@ func (i Interrupt) Enable() error {
 	if i.num < 0 || i.num > 31 {
 		return errors.New("interrupt number out of range [0-31]")
 	}
-
-	// Set INTENABLE bit for this interrupt line
+	old := rsil_15() // mask IRQs on this CPU during RMW on INTENABLE
 	mask := read_intenable()
 	mask |= (1 << uint(i.num))
 	write_intenable(mask)
-
+	rsil_set(old & 0x0F) // restore previous INTLEVEL
 	return nil
 }
 
@@ -89,30 +113,35 @@ func (i Interrupt) SetPriority(priority uint8) error {
 // WARNING: This is a low-level function. Prefer using Disable()/Restore()
 func SetPSIntLevel(level int) {
 	lvl := uint32(level & 0x0F)
-	// Read current PS using assembly helper
 	cur := get_ps()
 	curLvl := cur & 0x0F
 
+	if lvl == curLvl {
+		return
+	}
+
 	if lvl > curLvl {
-		// Raising mask: use RSIL to atomically set PS.INTLEVEL when possible
+		// Raising mask: atomic RSIL when available
 		switch lvl {
 		case 1:
 			rsil_1()
 		case 15:
 			rsil_15()
 		default:
-			// For other levels, modify PS directly
-			newPS := (cur &^ 0x0F) | lvl
-			set_ps(newPS)
+			rsil_set(lvl)
 		}
-	} else if lvl != curLvl {
-		// Lowering mask: update PS keeping other bits
-		newPS := (cur &^ 0x0F) | lvl
-		set_ps(newPS)
+		return
 	}
+
+	// Lowering mask
+	if lvl == 0 {
+		rsil_0()
+		return
+	}
+	rsil_set(lvl)
 }
 
-// Disable disables all interrupts and returns the previous interrupt state. It
+// Disable disables all interrupts (sets PS.INTLEVEL=15) and returns the previous PS snapshot. It
 // can be used in a critical section like this:
 //
 //	state := interrupt.Disable()
@@ -126,9 +155,8 @@ func SetPSIntLevel(level int) {
 // ESP-IDF: components/freertos/FreeRTOS-Kernel-SMP/portable/xtensa/include/freertos/portmacro.h
 func Disable() (state State) {
 	// Atomically set INTLEVEL=15 and get old PS value
-	oldPS := rsil_15()
-	// Return previous INTLEVEL field only (bits [3:0])
-	return State(oldPS & 0x0F)
+	old := rsil_15()
+	return State(old)
 }
 
 // Restore restores interrupts to what they were before. Give the previous state
@@ -138,34 +166,43 @@ func Disable() (state State) {
 //
 // This implementation ensures INTLEVEL is restored even if a direct PS write is ignored,
 // by falling back to RSIL-based sequences.
+//
+//go:nosplit
 func Restore(state State) {
-	// Target INTLEVEL we want to restore
+	// Restore only the INTLEVEL field from the saved PS snapshot
 	target := uint32(state) & 0x0F
-	// Read current PS
 	curPS := get_ps()
 	cur := curPS & 0x0F
+
 	if target == cur {
 		return
 	}
+
 	if target > cur {
-		// Raising mask: prefer atomic RSIL for known immediates
+		// Raising mask: prefer RSIL immediates where possible
 		switch target {
 		case 1:
 			rsil_1()
 		case 15:
 			rsil_15()
 		default:
-			set_ps((curPS &^ 0x0F) | target)
+			rsil_set(target)
 		}
 		return
 	}
-	// Lowering mask: write PS; if it does not stick (some environments), force via rsil_0 then set target.
-	set_ps((curPS &^ 0x0F) | target)
+
+	// Lowering mask
+	if target == 0 {
+		rsil_0()
+		return
+	}
+
+	rsil_set(target)
 	if (get_ps() & 0x0F) != target {
-		// Forcefully unmask to level 0 and then set desired
+		// As a last resort, force 0 then set target
 		rsil_0()
 		if target != 0 {
-			set_ps((get_ps() &^ 0x0F) | target)
+			rsil_set(target)
 		}
 	}
 }
@@ -181,6 +218,7 @@ func In() bool {
 // Adding pseudo function calls that is replaced by the compiler with the actual
 // functions registered through interrupt.New.
 //
+
 //go:linkname callHandlers runtime/interrupt.callHandlers
 func callHandlers(num int)
 

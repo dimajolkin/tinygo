@@ -602,11 +602,7 @@ func initSystimerTick() {
 	}
 	println("SYST: SYSTIMER frequency: 16MHz, period:", tickPeriodNs, "ns =", periodTicks, "ticks")
 
-	// Temporarily block interrupts during configuration
-	println("SYST: Before Disable()...")
-	old := interrupt.Disable()
-	println("SYST: After Disable(), old INTLEVEL=", uint32(old)&0x0F)
-
+	_ = interrupt.Disable()
 	// Verify interrupts are actually disabled
 	psAfterDisable := interrupt.GetPS()
 	intlevelNow := psAfterDisable & 0x0F
@@ -776,25 +772,9 @@ func initSystimerTick() {
 	esp.SYSTIMER.INT_ENA.SetBits(1 << 0)
 	// --- END ACCESS CHECK ---
 
-	// Verify interrupts are still disabled before Restore
-	psBeforeRestore := interrupt.GetPS()
-	intlevelBefore := psBeforeRestore & 0x0F
-	println("SYST: Before Restore(), INTLEVEL=", intlevelBefore, "(should be 15)")
-	println("SYST: Will restore to INTLEVEL=", uint32(old))
-
-	// About to restore interrupts
-	println("SYST: About to call interrupt.Restore()...")
-
-	// Restore interrupts (PS register) - NOW interrupts can fire
-	interrupt.Restore(old)
-
-	println("SYST: Returned from interrupt.Restore()!")
-
-	// Verify interrupts are restored
-	psAfterRestore := interrupt.GetPS()
-	intlevelAfter := psAfterRestore & 0x0F
-	println("SYST: After Restore(), INTLEVEL=", intlevelAfter, "(should be", uint32(old), ")")
-	println("SYST: PS.INTLEVEL restored, now enabling CPU interrupt line...")
+	// Note: interrupts already restored above (after debugGPIO(5))
+	// The following section is for later configuration
+	println("SYST: Starting SYSTIMER configuration with interrupts enabled...")
 
 	// --- ACCESS CHECK: Interrupt Matrix mapping register ---
 	mapBefore := esp.INTERRUPT_CORE0.SYSTIMER_TARGET0_INT_MAP.Get()

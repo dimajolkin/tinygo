@@ -25,7 +25,6 @@
 		"src/device/esp/xtensa_context_esp32s3.S",
 		"src/device/esp/xtensa_exception_esp32s3.S",
 		"src/device/esp/xtensa_vectors_esp32s3.S",
-		"src/device/esp/interrupt_helpers_esp32s3.S",
 		"src/device/esp/gpio_debug_esp32s3.S",
 		"src/device/esp/vecbase_esp32s3.S"
 	],
