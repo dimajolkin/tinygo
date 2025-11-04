@@ -43,7 +43,9 @@ _xt_context_save:
     // ===== Сохранить регистры общего назначения =====
     // Сохранить A0 на смещение XT_STK_A0 (12 байт)
     s32i    a0, sp, XT_STK_A0
-    s32i    a1, sp, XT_STK_A1               // Исходный SP (до вычитания)
+    // Сохранить исходный SP (до вычитания): sp_old = sp + XT_STK_FRMSZ
+    addi    a3, sp, XT_STK_FRMSZ
+    s32i    a3, sp, XT_STK_A1
     s32i    a2, sp, XT_STK_A2
     s32i    a3, sp, XT_STK_A3
     s32i    a4, sp, XT_STK_A4
@@ -58,45 +60,45 @@ _xt_context_save:
     s32i    a13, sp, XT_STK_A13
     s32i    a14, sp, XT_STK_A14
     s32i    a15, sp, XT_STK_A15
-    
+
     // ===== Сохранить регистры управления =====
-    
+
     // SAR (Shift Amount Register)
     rsr.sar a2
     s32i    a2, sp, XT_STK_SAR
-    
+
     // EXCCAUSE (Exception Cause)
     rsr.exccause a2
     s32i    a2, sp, XT_STK_EXCCAUSE
-    
+
     // EXCVADDR (Exception Virtual Address)
     rsr.excvaddr a2
     s32i    a2, sp, XT_STK_EXCVADDR
-    
+
     // LBEG, LEND, LCOUNT (Loop registers)
     rsr.lbeg a2
     s32i    a2, sp, XT_STK_LBEG
-    
+
     rsr.lend a2
     s32i    a2, sp, XT_STK_LEND
-    
+
     rsr.lcount a2
     s32i    a2, sp, XT_STK_LCOUNT
-    
+
     // ===== Сохранить Program Status и PC =====
     // PS уже был сохранен в ESP-IDF обработчике, но сохраним для консистентности
     rsr.ps a2
     s32i    a2, sp, XT_STK_PS
-    
+
     // PC сохраняется из a0 (return address)
     // Это адрес инструкции, которая должна выполниться при возврате
     l32i    a2, sp, XT_STK_A0               // Загрузить A0 (return address)
     s32i    a2, sp, XT_STK_PC
-    
+
     // Добавить адрес выхода (используется в некоторых обработчиках)
     movi    a2, _xt_context_restore_and_return
     s32i    a2, sp, XT_STK_EXIT
-    
+
     // Возвращаемое значение = указатель на сохраненный контекст
     // a2 (возвращаемое значение) = sp (новый стек указатель)
     mov     a2, sp
@@ -104,18 +106,18 @@ _xt_context_save:
 
 /*
  * _xt_context_restore - Восстановить контекст из стека
- * 
+ *
  * Входные параметры:
  *   a2 = указатель на сохраненный контекст (на стеке)
- *   
+ *
  * Действия:
  *   1. Восстановить все регистры из стека
  *   2. Восстановить регистры управления
  *   3. Увеличить стек на 112 байт
  *   4. Перейти на восстановленный адрес (PC)
- *   
+ *
  * Регистр a1 (sp) восстанавливается из контекста
- * 
+ *
  * Использует: a3-a7 (рабочие регистры при восстановлении)
  */
 .section .text._xt_context_restore,"ax",@progbits
@@ -126,43 +128,44 @@ _xt_context_save:
 _xt_context_restore:
     // a2 = указатель на контекст
     // Используем a2 как базовый указатель для загрузки
-    
+
     // ===== Восстановить регистры управления =====
-    
+
     // SAR (Shift Amount Register)
     l32i    a3, a2, XT_STK_SAR
     wsr.sar a3
-    
+
     // EXCCAUSE (Exception Cause)
     l32i    a3, a2, XT_STK_EXCCAUSE
     wsr.exccause a3
-    
+
     // EXCVADDR (Exception Virtual Address)
     l32i    a3, a2, XT_STK_EXCVADDR
     wsr.excvaddr a3
-    
+
     // LBEG, LEND, LCOUNT (Loop registers)
     l32i    a3, a2, XT_STK_LBEG
     wsr.lbeg a3
-    
+
     l32i    a3, a2, XT_STK_LEND
     wsr.lend a3
-    
+
     l32i    a3, a2, XT_STK_LCOUNT
     wsr.lcount a3
-    
+
     // Program Status (PS)
     l32i    a3, a2, XT_STK_PS
     wsr.ps  a3
-    
+
     // Синхронизация после записи в регистры управления
     rsync
-    
+
     // ===== Восстановить регистры общего назначения =====
     // A0 восстанавливаем в последний момент (нужен для возврата)
-    
+
     // Восстановить A1-A15 (SP восстанавливаем в конце)
-    l32i    a1, a2, XT_STK_A1
+    // Восстановить SP как адрес после фрейма: sp = frame + XT_STK_FRMSZ
+    addi    a1, a2, XT_STK_FRMSZ
     l32i    a3, a2, XT_STK_A3
     l32i    a4, a2, XT_STK_A4
     l32i    a5, a2, XT_STK_A5
@@ -176,11 +179,11 @@ _xt_context_restore:
     l32i    a13, a2, XT_STK_A13
     l32i    a14, a2, XT_STK_A14
     l32i    a15, a2, XT_STK_A15
-    
+
     // Восстановить PC в A0 и возвращаемое значение в A2
     l32i    a0, a2, XT_STK_PC
     l32i    a2, a2, XT_STK_A2
-    
+
     // Возврат из обработчика прерывания
     ret
 
@@ -219,8 +222,8 @@ _xt_context_restore_and_return:
 .type _xt_context_restore_rfe,@function
 
 _xt_context_restore_rfe:
-    // Восстановить SP из сохраненного контекста
-    l32i    a1, a2, XT_STK_A1
+    // Восстановить SP как адрес после фрейма: sp = frame + XT_STK_FRMSZ
+    addi    a1, a2, XT_STK_FRMSZ
 
     // Восстановить регистры управления (порядок как в restore)
     l32i    a3, a2, XT_STK_SAR
@@ -241,6 +244,9 @@ _xt_context_restore_rfe:
     l32i    a3, a2, XT_STK_LCOUNT
     wsr.lcount a3
 
+    // Восстановить EPC1 из сохранённого PC для корректного RFE
+    l32i    a3, a2, XT_STK_PC
+    wsr.epc1 a3
     // Восстановить PS (INTLEVEL и др.)
     l32i    a3, a2, XT_STK_PS
     wsr.ps  a3

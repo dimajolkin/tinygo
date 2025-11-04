@@ -251,6 +251,7 @@ _xt_user_exit:
     .begin      literal_prefix .DoubleExceptionVector
     .section    .DoubleExceptionVector.text, "ax"
     .align      4
+.global     _DoubleExceptionVector
 _DoubleExceptionVector:
     call0   _xt_unhandled_exception
     .size       _DoubleExceptionVector, . - _DoubleExceptionVector
@@ -260,6 +261,7 @@ _DoubleExceptionVector:
     .begin      literal_prefix .KernelExceptionVector
     .section    .KernelExceptionVector.text, "ax"
     .align      4
+.global     _KernelExceptionVector
 _KernelExceptionVector:
     call0   _xt_unhandled_exception
     .size       _KernelExceptionVector, . - _KernelExceptionVector
@@ -269,6 +271,7 @@ _KernelExceptionVector:
     .begin      literal_prefix .NMIExceptionVector
     .section    .NMIExceptionVector.text, "ax"
     .align      4
+.global     _NMIExceptionVector
 _NMIExceptionVector:
     call0   _xt_unhandled_exception
     .size       _NMIExceptionVector, . - _NMIExceptionVector
@@ -278,6 +281,7 @@ _NMIExceptionVector:
     .begin      literal_prefix .Level2InterruptVector
     .section    .Level2InterruptVector.text, "ax"
     .align      4
+.global     _Level2InterruptVector
 _Level2InterruptVector:
     call0   _xt_unhandled_exception
     .size       _Level2InterruptVector, . - _Level2InterruptVector
@@ -287,6 +291,7 @@ _Level2InterruptVector:
     .begin      literal_prefix .Level3InterruptVector
     .section    .Level3InterruptVector.text, "ax"
     .align      4
+.global     _Level3InterruptVector
 _Level3InterruptVector:
     call0   _xt_unhandled_exception
     .size       _Level3InterruptVector, . - _Level3InterruptVector
@@ -296,6 +301,7 @@ _Level3InterruptVector:
     .begin      literal_prefix .Level4InterruptVector
     .section    .Level4InterruptVector.text, "ax"
     .align      4
+.global     _Level4InterruptVector
 _Level4InterruptVector:
     call0   _xt_unhandled_exception
     .size       _Level4InterruptVector, . - _Level4InterruptVector
@@ -305,6 +311,7 @@ _Level4InterruptVector:
     .begin      literal_prefix .Level5InterruptVector
     .section    .Level5InterruptVector.text, "ax"
     .align      4
+.global     _Level5InterruptVector
 _Level5InterruptVector:
     call0   _xt_unhandled_exception
     .size       _Level5InterruptVector, . - _Level5InterruptVector
@@ -314,6 +321,7 @@ _Level5InterruptVector:
     .begin      literal_prefix .Level6InterruptVector
     .section    .Level6InterruptVector.text, "ax"
     .align      4
+.global     _Level6InterruptVector
 _Level6InterruptVector:
     call0   _xt_unhandled_exception
     .size       _Level6InterruptVector, . - _Level6InterruptVector
@@ -323,6 +331,7 @@ _Level6InterruptVector:
     .begin      literal_prefix .Level7InterruptVector
     .section    .Level7InterruptVector.text, "ax"
     .align      4
+.global     _Level7InterruptVector
 _Level7InterruptVector:
     call0   _xt_unhandled_exception
     .size       _Level7InterruptVector, . - _Level7InterruptVector
