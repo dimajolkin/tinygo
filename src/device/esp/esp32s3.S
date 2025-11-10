@@ -69,7 +69,7 @@ call_start_cpu0:
     // call0 copyVectorsToIRAM  // DISABLED - not needed
 
     // Set VECBASE to point to interrupt vectors in IRAM
-    call0 runtime.setVecbaseToVectorBase
+    call0 setVecbaseToVectorBase
 
     // Jump to main using call4 (Windowed ABI)
     call4 main

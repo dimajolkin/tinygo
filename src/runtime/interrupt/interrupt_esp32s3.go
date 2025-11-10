@@ -14,6 +14,7 @@ package interrupt
 
 import (
 	"device"
+	"device/esp"
 	"errors"
 	"unsafe"
 	_ "unsafe" // for go:linkname
@@ -214,10 +215,6 @@ func In() bool {
 	return (ps & (1 << 4)) != 0
 }
 
-// Adding pseudo function calls that is replaced by the compiler with the actual
-// functions registered through interrupt.New.
-//
-
 //go:linkname callHandlers runtime/interrupt.callHandlers
 func callHandlers(num int)
 
@@ -278,36 +275,26 @@ func SetPS(v uint32) {
 // --- SYSTIMER/INTERRUPT register access checks for ESP32-S3 ---
 // Inserted for hardware debug/validation in runtime_esp32s3.go
 
-// handleInterrupt - главный диспетчер прерываний для ESP32-S3 (ESP-IDF style)
+// handleInterrupt - абсолютно минимальный обработчик для тестирования
 //
 //export handleInterrupt
 func handleInterrupt() {
-	debugGPIO(7)
 	// Increment counter
 	handleInterruptCallCount++
 
-	// Generic Level-1 dispatcher per ISA: service all currently pending & enabled bits.
-	// We recompute the mask each iteration to catch new arrivals during servicing.
-	//for tries := 0; tries < 8; tries++ { // simple bound to avoid livelock in case of flapping sources
-	//	pend := pendingCPU()
-	//	if pend == 0 {
-	//		break
-	//	}
-	//	// Find lowest set bit using bits.TrailingZeros32
-	//	bit := uint32(bits.TrailingZeros32(pend))
-	//	if bit < 32 {
-	//		// Call registered handler; peripheral handler must clear its own flag
-	//		// For SW/edge sources, handler may call clearCpuInterrupt(bit)
-	//		callHandler(int(bit))
-	//	} else {
-	//		break
-	//	}
-	//}
+	// MINIMAL: Only clear SYSTIMER interrupt and return
+	// Clear SYSTIMER TARGET0 interrupt
+	esp.SYSTIMER.INT_CLR.Set(1 << 0)
+
+	// Clear CPU interrupt line 1
+	write_intclear(1 << 1)
 }
 
 // DEBUG: Counter to track if handleException is called
 var handleExceptionCallCount uint32
 
+// Simplified debug function - only GPIO7 for interrupt status
+// Debug functions sorted by GPIO number (ascending: 4→5→6→7)
 func debugGPIO(n int) {
 	*(*uint32)(unsafe.Pointer(uintptr(0x60004024))) |= (1 << n) // GPIO_ENABLE_REG: enable GPIO4 output
 	*(*uint32)(unsafe.Pointer(uintptr(0x60004008))) = (1 << n)  // GPIO_OUT_W1TS_REG: set GPIO4 high
@@ -439,4 +426,27 @@ func callHandler(n int) {
 // Used for debugging interrupt system.
 func GetHandleInterruptCallCount() uint32 {
 	return handleInterruptCallCount
+}
+
+// Invoke dispatches to registered TinyGo interrupt handlers for a given CPU line.
+// It is safe to call from an ISR context; the vector code already raised INTLEVEL
+// and will restore PS on return.
+//
+//go:nosplit
+func Invoke(line uint32) {
+	callHandler(int(line))
+}
+
+//go:nosplit
+//export __tg_clear_irq_source1
+func __tg_clear_irq_source1() {
+	debugGPIO(5)
+	esp.SYSTIMER.INT_CLR.Set(1 << 0)
+}
+
+//go:nosplit
+//export __tg_handle_cpu_interrupt
+func __tg_handle_cpu_interrupt(line uint32) {
+	debugGPIO(4)
+	Invoke(line)
 }

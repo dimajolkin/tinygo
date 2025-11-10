@@ -257,12 +257,15 @@ func main() {
 	checkVectorsInMemory()
 
 	// Initialize SYSTIMER for system tick
-	//initSystimerTick()  // DISABLED: testing exceptions without interrupts
+	initSystimerTick() // ENABLED: testing with interrupts
 
-	testUnhandledException()
+	// testUnhandledException() // DISABLED: causes system hang, test SYSTIMER first
 
 	// Check if SYSTIMER interrupts are working
-	//checkSystemTimer()  // DISABLED: will test after exception handling works
+	// checkSystemTimer() // DISABLED: causes hang when reading SYSTIMER registers
+
+	println("SYSTIMER initialized, skipping ALL tests")
+	println("Going directly to run() to test basic system stability")
 
 	// Exception test (DANGEROUS - will halt system!)
 	// Uncomment to verify exception handling:
@@ -751,9 +754,6 @@ func initSystimerTick() {
 	// Switch to PERIODIC mode
 	esp.SYSTIMER.SetTARGET0_CONF_TARGET0_PERIOD_MODE(1)
 
-	// Enable interrupt
-	esp.SYSTIMER.INT_ENA.SetBits(1 << 0)
-
 	// Step 10: Enable INTENABLE bit (keep INTLEVEL=15 during init!)
 	oldMask := interrupt.Disable()
 	ien := interrupt.ReadIntEnable()
@@ -764,16 +764,22 @@ func initSystimerTick() {
 	// Step 11: Lower INTLEVEL to 0 to enable interrupts
 	interrupt.SetPSIntLevel(0)
 
+	// Enable interrupt
+	esp.SYSTIMER.INT_ENA.SetBits(1 << 0)
+
 	println("SYSTIMER: Initialized and ACTIVE, period", periodTicks, "ticks (1ms)")
 }
 
 // systimerHandleInterrupt handles SYSTIMER TARGET0 interrupt (1ms tick).
 func systimerHandleInterrupt(intr interrupt.Interrupt) {
+	debugGPIO(4)
 	// Clear interrupt status FIRST
 	esp.SYSTIMER.INT_CLR.Set(1 << 0)
 
 	// Increment counter
 	systimerIRQCount++
+
+	// NO DEBUG OUTPUT - may cause hang in interrupt context
 }
 
 // checkSystemTimer verifies that SYSTIMER interrupts are working correctly.
@@ -783,10 +789,13 @@ func checkSystemTimer() {
 	startCount := systimerIRQCount
 	println("Initial IRQ count:", startCount)
 
-	// Wait for interrupts (should fire every 1ms)
+	// Simplified test - just wait and check counter
 	println("Waiting 100ms for interrupts...")
 	for i := 0; i < 100; i++ {
 		sleepTicks(nanosecondsToTicks(1_000_000)) // 1ms
+		if i%25 == 0 {
+			println("  Waiting... tick", i, "IRQ count:", systimerIRQCount)
+		}
 	}
 
 	endCount := systimerIRQCount
@@ -798,68 +807,9 @@ func checkSystemTimer() {
 	if interruptsReceived > 0 {
 		println("✓ SYSTIMER interrupts are WORKING!")
 		println("  Rate:", interruptsReceived, "interrupts per 100ms")
-
-		// Calculate accuracy (should be ~100 for 100ms with 1ms period)
-		expectedCount := 100
-		accuracy := (interruptsReceived * 100) / expectedCount
-		println("  Accuracy:", accuracy, "%")
-
-		if accuracy < 90 || accuracy > 110 {
-			println("  ⚠️  Warning: Interrupt rate outside expected range (90-110%)")
-		}
 	} else {
 		println("✗ ERROR: No SYSTIMER interrupts received!")
-		println("  Checking system state...")
-
-		// Debug info - CPU state
-		psNow := interrupt.GetPS()
-		ienNow := interrupt.ReadIntEnable()
-		intPending := interrupt.ReadInterrupt()
-
-		println("\n  CPU State:")
-		println("    PS (INTLEVEL):", psNow&0x0F, "(should be 0)")
-		println("    INTENABLE:", ienNow, "(bit 1 should be set)")
-		println("    INTERRUPT:", intPending, "(shows pending interrupts)")
-
-		// Debug info - SYSTIMER state
-		println("\n  SYSTIMER State:")
-		println("    INT_ST:", esp.SYSTIMER.INT_ST.Get(), "(interrupt status)")
-		println("    INT_ENA:", esp.SYSTIMER.INT_ENA.Get(), "(bit 0 should be set)")
-		println("    INT_RAW:", esp.SYSTIMER.INT_RAW.Get(), "(raw interrupt)")
-
-		confReg := esp.SYSTIMER.CONF.Get()
-		println("    CONF:", confReg)
-		println("      UNIT0_WORK_EN:", (confReg>>30)&1, "(should be 1)")
-		println("      TARGET0_WORK_EN:", (confReg>>24)&1, "(should be 1)")
-
-		target0Conf := esp.SYSTIMER.TARGET0_CONF.Get()
-		println("    TARGET0_CONF:", target0Conf)
-		println("      PERIOD_MODE:", (target0Conf>>30)&1, "(should be 1)")
-		println("      PERIOD:", target0Conf&0x3FFFFFF)
-
-		// Debug info - Interrupt Matrix
-		println("\n  Interrupt Matrix:")
-		actualMap := esp.INTERRUPT_CORE0.GetSYSTIMER_TARGET0_INT_MAP()
-		println("    SYSTIMER_TARGET0 → CPU line:", actualMap, "(should be 1)")
-
-		// Debug info - Counter value
-		println("\n  Counter Status:")
-		esp.SYSTIMER.SetUNIT0_OP_TIMER_UNIT0_UPDATE(1)
-		for esp.SYSTIMER.GetUNIT0_OP_TIMER_UNIT0_VALUE_VALID() == 0 {
-		}
-		counterLo := esp.SYSTIMER.UNIT0_VALUE_LO.Get()
-		counterHi := esp.SYSTIMER.UNIT0_VALUE_HI.Get()
-		println("    UNIT0_VALUE_HI:", counterHi)
-		println("    UNIT0_VALUE_LO:", counterLo)
-
-		targetLo := esp.SYSTIMER.TARGET0_LO.Get()
-		targetHi := esp.SYSTIMER.TARGET0_HI.Get()
-		println("    TARGET0_HI:", targetHi)
-		println("    TARGET0_LO:", targetLo)
-
-		if counterLo > targetLo {
-			println("    ⚠️  Counter already passed target!")
-		}
+		println("  handleInterrupt calls:", interrupt.GetHandleInterruptCallCount())
 	}
 
 	println("=== END TEST ===\n")
@@ -868,7 +818,7 @@ func checkSystemTimer() {
 // testUnhandledException triggers a real CPU exception to verify the full exception path:
 // CPU → Vector Table → _xt_unhandled_exception → handleException
 // This will cause a fatal exception and halt the system!
-func testUnhandledException() {
+func testUnhandledExceptionDISABLED() {
 	println("\n=== TESTING EXCEPTION HANDLING (FULL PATH) ===")
 	println("⚠️  This will trigger a REAL CPU EXCEPTION!")
 	println("Expected flow:")

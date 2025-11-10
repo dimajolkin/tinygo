@@ -8,20 +8,20 @@
 
 .extern _vector_base
 
-.section .text.runtime.setVecbaseToVectorBase
-.global runtime.setVecbaseToVectorBase
-.type runtime.setVecbaseToVectorBase,@function
+.section .text.setVecbaseToVectorBase
+.global setVecbaseToVectorBase
+.type setVecbaseToVectorBase,@function
 .align 4
 .literal_position                       // Place literals here
 
-// void runtime.setVecbaseToVectorBase()
+// void setVecbaseToVectorBase()
 // Sets VECBASE to _vector_base address from linker script
 // IMPORTANT: Disables interrupts during VECBASE change to avoid race conditions
 //
 // Uses hardcoded address 0x40374000 since TinyGo linker cannot properly
 // resolve //go:extern symbols in assembly literal pools.
 // This address MUST match the linker script: .vectors 0x40374000
-runtime.setVecbaseToVectorBase:
+setVecbaseToVectorBase:
     .align 4
 
     // Load _vector_base address (hardcoded since TinyGo linker cannot resolve symbols in literal pools)

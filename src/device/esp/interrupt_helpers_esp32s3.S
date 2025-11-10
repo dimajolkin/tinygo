@@ -33,6 +33,11 @@
 #define PS_SR          230
 
 
+// External Go function for interrupt dispatching
+.extern Invoke
+.extern __tg_clear_irq_source1
+.extern __tg_handle_cpu_interrupt
+
 .section .iram1.text, "ax"
 
 // uint32_t __tg_read_interrupt(void)
@@ -177,3 +182,5 @@ __tg_rsil_15:
     rsil a2, 15           // atomically set INTLEVEL=15, return old PS in a2
     ret.n                 // Call0 return
 .size __tg_rsil_15, . - __tg_rsil_15
+
+
