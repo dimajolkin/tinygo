@@ -12,6 +12,7 @@ type I2C struct {
 	Bus              *esp.I2C_Type
 	funcSCL, funcSDA uint32
 	useExt1          bool
+	mode             I2CMode
 }
 
 // I2CConfig is used to store config info for I2C.
@@ -19,6 +20,7 @@ type I2CConfig struct {
 	Frequency uint32 // in Hz
 	SCL       Pin
 	SDA       Pin
+	Mode      I2CMode
 }
 
 const (
@@ -41,11 +43,16 @@ func (i2c *I2C) Configure(config I2CConfig) error {
 		config.SDA = SDA_PIN
 	}
 
+	i2c.mode = config.Mode
 	i2c.initClock(config)
 	i2c.initNoiseFilter()
 	i2c.initPins(config)
 	i2c.initFrequency(config)
-	i2c.startMaster()
+	if i2c.mode == I2CModeTarget {
+		i2c.startSlave()
+	} else {
+		i2c.startMaster()
+	}
 	return nil
 }
 
@@ -134,6 +141,26 @@ func (i2c *I2C) startMaster() {
 	i2c.Bus.CTR.Set(0x113)
 	i2c.Bus.SetCTR_CONF_UPGATE(1)
 	i2c.resetMaster()
+}
+
+//go:inline
+func (i2c *I2C) startSlave() {
+	i2c.Bus.SetFIFO_CONF_NONFIFO_EN(0)
+	i2c.Bus.SetFIFO_CONF_RX_FIFO_RST(1)
+	i2c.Bus.SetFIFO_CONF_RX_FIFO_RST(0)
+	i2c.Bus.SetFIFO_CONF_TX_FIFO_RST(1)
+	i2c.Bus.SetFIFO_CONF_TX_FIFO_RST(0)
+	i2c.Bus.TO.Set(0x10)
+	i2c.Bus.CTR.Set(0x113)
+	i2c.Bus.SetCTR_MS_MODE(0)
+	i2c.Bus.SetCTR_CONF_UPGATE(1)
+	i2c.Bus.SetSCL_STRETCH_CONF_SLAVE_SCL_STRETCH_EN(1)
+	i2c.Bus.SetCTR_CONF_UPGATE(1)
+	slaveIntMask := esp.I2C_INT_STATUS_END_DETECT_INT_ST_Msk |
+		esp.I2C_INT_STATUS_DET_START_INT_ST_Msk |
+		esp.I2C_INT_STATUS_SLAVE_STRETCH_INT_ST_Msk
+	i2c.Bus.INT_CLR.SetBits(slaveIntMask)
+	i2c.Bus.INT_ENA.SetBits(slaveIntMask)
 }
 
 //go:inline
@@ -310,6 +337,9 @@ func (i2c *I2C) transmit(addr uint16, cmd []i2cCommand, timeoutMS int) error {
 // It clocks out the given address, writes the bytes in w, reads back len(r)
 // bytes and stores them in r, and generates a stop condition on the bus.
 func (i2c *I2C) Tx(addr uint16, w, r []byte) (err error) {
+	if i2c.mode != I2CModeController {
+		return errI2CNotImplemented
+	}
 	// timeout in milliseconds.
 	const timeout = 40 // 40ms is a reasonable time for a real-time system.
 
@@ -327,6 +357,78 @@ func (i2c *I2C) Tx(addr uint16, w, r []byte) (err error) {
 }
 
 func (i2c *I2C) SetBaudRate(br uint32) error {
+	return nil
+}
+
+func (i2c *I2C) Listen(addr uint16) error {
+	if i2c.mode != I2CModeTarget {
+		return errI2CNotImplemented
+	}
+	if addr >= 0x80 {
+		return errI2CAckExpected
+	}
+	i2c.Bus.SLAVE_ADDR.Set(uint32(addr))
+	i2c.Bus.SetSLAVE_ADDR_ADDR_10BIT_EN(0)
+	i2c.Bus.SetCTR_CONF_UPGATE(1)
+	return nil
+}
+
+func (i2c *I2C) WaitForEvent(buf []byte) (evt I2CTargetEvent, count int, err error) {
+	const (
+		evEnd     = esp.I2C_INT_STATUS_END_DETECT_INT_ST_Msk
+		evStart   = esp.I2C_INT_STATUS_DET_START_INT_ST_Msk
+		evStretch = esp.I2C_INT_STATUS_SLAVE_STRETCH_INT_ST_Msk
+	)
+	for {
+		status := i2c.Bus.INT_STATUS.Get()
+		if status&evEnd != 0 {
+			i2c.Bus.INT_CLR.SetBits(evEnd)
+			rxCnt := i2c.Bus.GetSR_RXFIFO_CNT()
+			if rxCnt > 0 {
+				n := int(rxCnt)
+				if n > len(buf) {
+					n = len(buf)
+				}
+				for i := 0; i < n; i++ {
+					buf[i] = byte(i2c.Bus.GetDATA_FIFO_RDATA() & 0xff)
+				}
+				return I2CReceive, n, nil
+			}
+			return I2CFinish, 0, nil
+		}
+		if status&evStretch != 0 {
+			i2c.Bus.INT_CLR.SetBits(evStretch)
+			return I2CRequest, 0, nil
+		}
+		if status&evStart != 0 {
+			i2c.Bus.INT_CLR.SetBits(evStart)
+			if i2c.Bus.GetSR_SLAVE_RW() != 0 {
+				return I2CRequest, 0, nil
+			}
+			for status&evEnd == 0 {
+				status = i2c.Bus.INT_STATUS.Get()
+				gosched()
+			}
+			i2c.Bus.INT_CLR.SetBits(evEnd)
+			rxCnt := i2c.Bus.GetSR_RXFIFO_CNT()
+			n := int(rxCnt)
+			if n > len(buf) {
+				n = len(buf)
+			}
+			for i := 0; i < n; i++ {
+				buf[i] = byte(i2c.Bus.GetDATA_FIFO_RDATA() & 0xff)
+			}
+			return I2CReceive, n, nil
+		}
+		gosched()
+	}
+}
+
+func (i2c *I2C) Reply(buf []byte) error {
+	for i := 0; i < len(buf); i++ {
+		i2c.Bus.SetDATA_FIFO_RDATA(uint32(buf[i]))
+	}
+	i2c.Bus.INT_CLR.SetBits(esp.I2C_INT_STATUS_SLAVE_STRETCH_INT_ST_Msk)
 	return nil
 }
 
