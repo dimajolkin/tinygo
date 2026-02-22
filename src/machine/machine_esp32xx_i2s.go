@@ -11,7 +11,7 @@ import (
 
 const (
 	i2sPLL160M = 2
-	i2sPLLFreq = 160e6
+	i2sPLLFreq = 160e6 // I2S default clock is PLL_F160M (fixed 160 MHz), not APB 80 MHz (soc_periph_i2s_clk_src_t)
 )
 
 type I2S struct {
@@ -22,10 +22,8 @@ type I2S struct {
 
 type i2sSignals struct {
 	bckOut, wsOut, doutOut uint32
-	dinIn, mclkOut        uint32
+	dinIn, mclkOut         uint32
 }
-
-var enableI2S1ClockFunc func()
 
 type I2SMode uint8
 type I2SStandard uint8
@@ -86,28 +84,11 @@ func (i2s *I2S) Configure(config I2SConfig) error {
 		esp.SYSTEM.SetPERIP_RST_EN0_I2S0_RST(1)
 		esp.SYSTEM.SetPERIP_CLK_EN0_I2S0_CLK_EN(1)
 		esp.SYSTEM.SetPERIP_RST_EN0_I2S0_RST(0)
-	} else if enableI2S1ClockFunc != nil {
-		enableI2S1ClockFunc()
+	} else {
+		enableI2S1Clock()
 	}
 
 	bus := i2s.bus
-
-	if config.SCK != NoPin {
-		config.SCK.Configure(PinConfig{Mode: PinOutput})
-		config.SCK.outFunc().Set(i2s.sig.bckOut)
-	}
-	if config.WS != NoPin {
-		config.WS.Configure(PinConfig{Mode: PinOutput})
-		config.WS.outFunc().Set(i2s.sig.wsOut)
-	}
-	if config.SDO != NoPin {
-		config.SDO.Configure(PinConfig{Mode: PinOutput})
-		config.SDO.outFunc().Set(i2s.sig.doutOut)
-	}
-	if config.SDI != NoPin {
-		config.SDI.Configure(PinConfig{Mode: PinInput})
-		inFunc(i2s.sig.dinIn).Set(esp.GPIO_FUNC_IN_SEL_CFG_SEL | (uint32(config.SDI) << esp.GPIO_FUNC_IN_SEL_CFG_IN_SEL_Pos))
-	}
 
 	bus.TX_CLKM_CONF.Set(0)
 	bus.RX_CLKM_CONF.Set(0)
@@ -116,7 +97,7 @@ func (i2s *I2S) Configure(config I2SConfig) error {
 	bus.SetRX_CLKM_CONF_RX_CLK_ACTIVE(1)
 	bus.SetRX_CLKM_CONF_RX_CLK_SEL(i2sPLL160M)
 
-	mclkDiv, bckDiv := i2sClockDivs(config.AudioFrequency, config.DataFormat)
+	mclkDiv, bckDiv := i2sClockDivs(i2sPLLFreq, config.AudioFrequency, config.DataFormat)
 	bus.SetTX_CLKM_CONF_TX_CLKM_DIV_NUM(mclkDiv)
 	bus.TX_CLKM_DIV_CONF.Set(0)
 	bus.SetRX_CLKM_CONF_RX_CLKM_DIV_NUM(mclkDiv)
@@ -124,6 +105,7 @@ func (i2s *I2S) Configure(config I2SConfig) error {
 
 	bus.SetTX_CLKM_CONF_TX_CLK_ACTIVE(1)
 	bus.SetRX_CLKM_CONF_RX_CLK_ACTIVE(1)
+	bus.SetRX_CLKM_CONF_MCLK_SEL(0)
 
 	slotBits := uint32(16)
 	switch config.DataFormat {
@@ -136,26 +118,67 @@ func (i2s *I2S) Configure(config I2SConfig) error {
 	case I2SDataFormat32bit:
 		slotBits = 32
 	}
+	// Standard I2S on ESP32-S3/C3 is implemented as TDM with 2 slots (stereo). Per ESP-IDF HAL:
+	// tx_tdm_ws_width = width-1, tx_half_sample_bits = slot_bit_width-1; wrong half_sample_bits prevents WS from toggling.
 	bitsMod := slotBits - 1
-	halfSample := (slotBits / 2) - 1
+	halfSample := slotBits - 1
 
+	wsWidth := slotBits - 1
+	bus.SetTX_CONF1_TX_TDM_WS_WIDTH(wsWidth)
+	bus.SetRX_CONF1_RX_TDM_WS_WIDTH(wsWidth)
 	bus.SetTX_CONF1_TX_BCK_DIV_NUM(bckDiv - 1)
 	bus.SetTX_CONF1_TX_BITS_MOD(bitsMod)
+	bus.SetTX_CONF1_TX_TDM_CHAN_BITS(bitsMod)
 	bus.SetTX_CONF1_TX_MSB_SHIFT(1)
 	bus.SetTX_CONF1_TX_HALF_SAMPLE_BITS(halfSample)
 	bus.SetRX_CONF1_RX_BCK_DIV_NUM(bckDiv - 1)
 	bus.SetRX_CONF1_RX_BITS_MOD(bitsMod)
+	bus.SetRX_CONF1_RX_TDM_CHAN_BITS(bitsMod)
 	bus.SetRX_CONF1_RX_MSB_SHIFT(1)
 	bus.SetRX_CONF1_RX_HALF_SAMPLE_BITS(halfSample)
 
 	bus.SetTX_CONF_TX_SLAVE_MOD(0)
 	bus.SetTX_CONF_TX_PCM_BYPASS(1)
-	bus.SetTX_CONF_TX_TDM_EN(0)
 	bus.SetTX_CONF_TX_PDM_EN(0)
+	bus.SetTX_CONF_TX_STOP_EN(0)
+	bus.SetTX_CONF_TX_CHAN_MOD(0)
+	bus.SetTX_CONF_TX_LEFT_ALIGN(1)
+	bus.SetTX_CONF_TX_TDM_EN(1)
+	if !config.Stereo {
+		bus.SetTX_CONF_TX_MONO(1)
+		bus.SetTX_CONF_TX_CHAN_EQUAL(1)
+		bus.SetTX_CONF_TX_MONO_FST_VLD(0)
+	} else {
+		bus.SetTX_CONF_TX_MONO(0)
+	}
+	bus.SetTX_TDM_CTRL_TX_TDM_TOT_CHAN_NUM(1)
+	bus.SetTX_TDM_CTRL_TX_TDM_CHAN0_EN(1)
+	bus.SetTX_TDM_CTRL_TX_TDM_CHAN1_EN(1)
+
 	bus.SetRX_CONF_RX_SLAVE_MOD(0)
 	bus.SetRX_CONF_RX_PCM_BYPASS(1)
-	bus.SetRX_CONF_RX_TDM_EN(0)
 	bus.SetRX_CONF_RX_PDM_EN(0)
+	bus.SetRX_CONF_RX_LEFT_ALIGN(1)
+	bus.SetRX_CONF_RX_TDM_EN(1)
+	bus.SetRX_TDM_CTRL_RX_TDM_TOT_CHAN_NUM(1)
+	bus.SetRX_TDM_CTRL_RX_TDM_PDM_CHAN0_EN(1)
+	bus.SetRX_TDM_CTRL_RX_TDM_PDM_CHAN1_EN(1)
+	bus.SetTX_CONF_TX_WS_IDLE_POL(0)
+	bus.SetRX_CONF_RX_WS_IDLE_POL(0)
+
+	if config.SCK != NoPin {
+		config.SCK.configure(PinConfig{Mode: PinOutput}, i2s.sig.bckOut)
+	}
+	if config.WS != NoPin {
+		config.WS.configure(PinConfig{Mode: PinOutput}, i2s.sig.wsOut)
+	}
+	if config.SDO != NoPin {
+		config.SDO.configure(PinConfig{Mode: PinOutput}, i2s.sig.doutOut)
+	}
+	if config.SDI != NoPin {
+		config.SDI.Configure(PinConfig{Mode: PinInput})
+		inFunc(i2s.sig.dinIn).Set(esp.GPIO_FUNC_IN_SEL_CFG_SEL | (uint32(config.SDI) << esp.GPIO_FUNC_IN_SEL_CFG_IN_SEL_Pos))
+	}
 
 	bus.SetTX_CONF_TX_RESET(1)
 	bus.SetTX_CONF_TX_RESET(0)
@@ -173,10 +196,27 @@ func (i2s *I2S) Configure(config I2SConfig) error {
 	for bus.GetRX_CONF_RX_UPDATE() != 0 {
 	}
 
+	txStart := config.Mode == I2SModeSource || config.Mode == I2SModeSourceReceiver
+	rxStart := config.Mode == I2SModeReceiver || config.Mode == I2SModeSourceReceiver
+	if config.Mode == I2SModeSource {
+		rxStart = true
+	}
+	if txStart {
+		bus.SetTX_CONF_TX_UPDATE(1)
+		for bus.GetTX_CONF_TX_UPDATE() != 0 {
+		}
+		bus.SetTX_CONF_TX_START(1)
+	}
+	if rxStart {
+		bus.SetRX_CONF_RX_UPDATE(1)
+		for bus.GetRX_CONF_RX_UPDATE() != 0 {
+		}
+		bus.SetRX_CONF_RX_START(1)
+	}
 	return nil
 }
 
-func i2sClockDivs(sampleRate uint32, format I2SDataFormat) (mclkDiv, bckDiv uint32) {
+func i2sClockDivs(pllFreq, sampleRate uint32, format I2SDataFormat) (mclkDiv, bckDiv uint32) {
 	slotBits := uint32(16)
 	switch format {
 	case I2SDataFormat8bit:
@@ -189,18 +229,17 @@ func i2sClockDivs(sampleRate uint32, format I2SDataFormat) (mclkDiv, bckDiv uint
 		slotBits = 32
 	}
 	bckFreq := sampleRate * 2 * slotBits
-	mclkFreq := (bckFreq/64 + 1) * 64
-	if mclkFreq < bckFreq {
-		mclkFreq = bckFreq
+	if bckFreq == 0 {
+		return 2, 2
 	}
-	mclkDiv = i2sPLLFreq / mclkFreq
+	mclkDiv = pllFreq / (2 * bckFreq)
 	if mclkDiv < 2 {
 		mclkDiv = 2
 	}
 	if mclkDiv > 255 {
 		mclkDiv = 255
 	}
-	actualMclk := i2sPLLFreq / mclkDiv
+	actualMclk := pllFreq / mclkDiv
 	bckDiv = actualMclk / bckFreq
 	if bckDiv < 2 {
 		bckDiv = 2
@@ -213,7 +252,7 @@ func (i2s *I2S) SetSampleFrequency(freq uint32) error {
 		return ErrInvalidSampleFrequency
 	}
 	var format I2SDataFormat = I2SDataFormat16bit
-	mclkDiv, bckDiv := i2sClockDivs(freq, format)
+	mclkDiv, bckDiv := i2sClockDivs(i2sPLLFreq, freq, format)
 	bus := i2s.bus
 	bus.SetTX_CLKM_CONF_TX_CLKM_DIV_NUM(mclkDiv)
 	bus.SetTX_CONF1_TX_BCK_DIV_NUM(bckDiv - 1)
@@ -243,6 +282,9 @@ const (
 	i2sGDMAPeriI2S1 = 4
 )
 
+var i2sTxDesc i2sDmaDesc
+
+// i2sDmaDesc — формат как lldesc_t: word0 = size|length|eof|owner, word1 = buf, word2 = next.
 type i2sDmaDesc struct {
 	word0 volatile.Register32
 	word1 volatile.Register32
@@ -250,6 +292,13 @@ type i2sDmaDesc struct {
 }
 
 func (d *i2sDmaDesc) set(buf uintptr, size uint32, eof bool) {
+	if size > 4092 {
+		size = 4092
+	}
+	size = size & ^uint32(3)
+	if size == 0 {
+		size = 4
+	}
 	w0 := size & 0xfff
 	w0 |= (size & 0xfff) << 12
 	if eof {
@@ -300,9 +349,8 @@ func (i2s *I2S) WriteStereo(p []uint32) (n int, err error) {
 }
 
 func i2sWriteTx(i2s *I2S, buf unsafe.Pointer, size uint32) error {
-	var desc i2sDmaDesc
-	desc.set(uintptr(buf), size, true)
-	descAddr := uint32(uintptr(unsafe.Pointer(&desc))) & 0xFFFFF
+	i2sTxDesc.set(uintptr(buf), size, true)
+	descAddr := uint32(uintptr(unsafe.Pointer(&i2sTxDesc))) & 0xFFFFF
 
 	i2s.gdmaInit()
 	ch := i2s.id
@@ -312,12 +360,30 @@ func i2sWriteTx(i2s *I2S, buf unsafe.Pointer, size uint32) error {
 	}
 	switch ch {
 	case 0:
+		esp.DMA.SetOUT_CONF0_CH0_OUT_RST(1)
+		esp.DMA.SetOUT_CONF0_CH0_OUT_RST(0)
+		esp.DMA.SetOUT_CONF0_CH0_OUTDSCR_BURST_EN(1)
+		esp.DMA.SetOUT_CONF0_CH0_OUT_DATA_BURST_EN(1)
+	case 1:
+		esp.DMA.SetOUT_CONF0_CH1_OUT_RST(1)
+		esp.DMA.SetOUT_CONF0_CH1_OUT_RST(0)
+		esp.DMA.SetOUT_CONF0_CH1_OUTDSCR_BURST_EN(1)
+		esp.DMA.SetOUT_CONF0_CH1_OUT_DATA_BURST_EN(1)
+	}
+	i2sGdmaTxClearDone(ch)
+
+	switch ch {
+	case 0:
 		esp.DMA.SetOUT_LINK_CH0_OUTLINK_ADDR(descAddr)
 		esp.DMA.SetOUT_LINK_CH0_OUTLINK_START(1)
 	case 1:
 		esp.DMA.SetOUT_LINK_CH1_OUTLINK_ADDR(descAddr)
 		esp.DMA.SetOUT_LINK_CH1_OUTLINK_START(1)
 	}
+	i2s.bus.SetTX_CONF_TX_UPDATE(1)
+	for i2s.bus.GetTX_CONF_TX_UPDATE() != 0 {
+	}
+	i2s.bus.SetTX_CONF_TX_START(1)
 
 	for i := 0; i < 1000000; i++ {
 		if i2sGdmaTxDone(ch) || i2s.bus.GetINT_RAW_TX_DONE_INT_RAW() != 0 {
@@ -330,6 +396,7 @@ func i2sWriteTx(i2s *I2S, buf unsafe.Pointer, size uint32) error {
 	case 1:
 		esp.DMA.SetOUT_LINK_CH1_OUTLINK_STOP(1)
 	}
+	i2sGdmaTxClearDone(ch)
 	return nil
 }
 
@@ -372,6 +439,7 @@ func i2sReadRx(i2s *I2S, buf unsafe.Pointer, size uint32) error {
 	if ch == 1 {
 		esp.DMA.SetIN_PERI_SEL_CH1_PERI_IN_SEL(i2s.gdmaPeriSel())
 	}
+	i2sGdmaRxClearDone(ch)
 	switch ch {
 	case 0:
 		esp.DMA.SetIN_LINK_CH0_INLINK_ADDR(descAddr)
@@ -392,6 +460,7 @@ func i2sReadRx(i2s *I2S, buf unsafe.Pointer, size uint32) error {
 	case 1:
 		esp.DMA.SetIN_LINK_CH1_INLINK_STOP(1)
 	}
+	i2sGdmaRxClearDone(ch)
 	return nil
 }
 

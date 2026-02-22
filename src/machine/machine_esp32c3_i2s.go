@@ -28,10 +28,20 @@ var (
 	}
 )
 
+func enableI2S1Clock() {}
+
 func i2sGdmaTxDone(ch uint8) bool {
 	return esp.DMA.GetINT_RAW_CH0_OUT_EOF() != 0
 }
 
 func i2sGdmaRxDone(ch uint8) bool {
 	return esp.DMA.GetINT_RAW_CH0_IN_SUC_EOF() != 0
+}
+
+func i2sGdmaTxClearDone(ch uint8) {
+	esp.DMA.SetINT_CLR_CH0_OUT_EOF(1)
+}
+
+func i2sGdmaRxClearDone(ch uint8) {
+	esp.DMA.SetINT_CLR_CH0_IN_SUC_EOF(1)
 }
