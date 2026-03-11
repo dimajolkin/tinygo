@@ -48,6 +48,14 @@ call_start_cpu0:
     // _start function right after here).
     j _start
 
+.global call_start_cpu0_app
+.type call_start_cpu0_app,@function
+call_start_cpu0_app:
+    // Variant entry point for when an external bootloader (IDF) has already
+    // initialized flash/MMU. Just jump directly to the generic RISC-V start
+    // without touching cache/MMU again.
+    j _start
+
 .section .text.exception_vectors
 .global _vector_table
 .type _vector_table,@function

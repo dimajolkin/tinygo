@@ -51,6 +51,8 @@ func main() {
 
 	clearbss()
 
+	initCacheForWiFi()
+
 	// Configure interrupt handler
 	interruptInit()
 
@@ -100,3 +102,19 @@ func interruptInit() {
 
 //go:extern _vector_table
 var _vector_table [0]uintptr
+
+// EXTMEM (cache controller) на ESP32-C3, адреса из TRM/SVD.
+const (
+	extmemBase          = 0x600C4000
+	icacheCtrl          = extmemBase + 0x0
+	icacheTagPowerCtrl  = extmemBase + 0x8
+	icacheEnable        = 1 << 0
+	icacheTagMemForceOn = 1 << 0
+)
+
+func initCacheForWiFi() {
+	ctrl := (*volatile.Register32)(unsafe.Pointer(uintptr(icacheCtrl)))
+	ctrl.SetBits(icacheEnable)
+	tagCtrl := (*volatile.Register32)(unsafe.Pointer(uintptr(icacheTagPowerCtrl)))
+	tagCtrl.SetBits(icacheTagMemForceOn)
+}
